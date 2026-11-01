@@ -1,0 +1,24 @@
+{
+  "version": "0.6.4",
+  "build": 11,
+  "status": "private-test-snapshot",
+  "native_sources": "installed 0.6.4",
+  "worker_sources": "exact installed worker bytes",
+  "experimental_summarizers_included": false,
+  "files": {
+    "src/worker.py": "1c9069a5be0fb72c77d74c784547d31ac9f199ae10207143c70d953b1fe568a2",
+    "src/transcript_log.py": "bd71c5dba727a0e9092f6991954eb79abf1c4f515f682e3b03290f347310a1e2",
+    "src/WorkerClient.swift": "10923a5a96884b4a9e12589f69ca206044d2e05bf5aba78e91e2ff01623c50ac",
+    "src/MeetingOverlay.swift": "85b210a87f8d6c6d08ce6a4ca08c3060d833ec4d126ea7e774b44eba1143e3f4",
+    "src/MeetingIcon.swift": "7a5df81bb5d9fdc8121e185b1c1cd3d718fdff13c0e6ddb3000cf5e465574072",
+    "src/summary_writer.py": "58c5bfb8caf1262dd48008a06bc5411546b07f0bd484f901e7cf5472b2dab9a0",
+    "src/MicrophoneCapture.swift": "975b56280684e60b1b001085bb3fe3961f77887ff867aef9492185208907d707",
+    "src/CaptureController.swift": "941447948c91374498f7293a326969753db69b67912e17cc2d75d6f8c958abeb",
+    "src/AudioTap.swift": "e7622fe4e040bdb96fbd597d6be9292cfaf6923dd8eec2657a2b93a1b8b300e9",
+    "src/SummaryFreshness.swift": "7a2d6c4fe08cbcf09b8333d57019885de244e05aeb1b39a4b6e3821cc8d7b67b",
+    "src/AudioSpool.swift": "2810d65c35b5031e11aa0f18aedaee7d30fccf2dd6f19dae8dbb80ab4d7818d7",
+    "src/SummaryRequestPolicy.swift": "1370439e0013a7ef17fe950d480f524db5054d2112ffef4e9eccfa8e1d19a009",
+    "src/AudioMixer.swift": "c700923ad8b6aea0fc33a49400eb7a867adc7842b08591f872520af31c28e92e",
+    "src/recent_transcript.py": "e65c998f4424c283996f153998227d01148c1756110346a9d149005567f56b04"
+  }
+}
