@@ -1,0 +1,9 @@
+*.swift text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.png binary
+*.icns binary
+*.wav binary
+*.zip binary
+dist/** linguist-vendored

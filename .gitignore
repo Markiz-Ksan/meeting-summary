@@ -1,0 +1,30 @@
+# Local runtime, weights, caches and credentials
+runtime/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+!.env.example
+signing-identity.txt
+*.p12
+*.pfx
+*.pem
+*.key
+*.mobileprovision
+*.app/
+*.dmg
+# Local meeting data and machine-specific diagnostics
+sessions/
+transcripts/
+Расшифровки встреч/
+*.log
+*.jsonl
+evaluation-results/
+# Only the explicitly reviewed test bundle is tracked under dist.
+dist/*
+!dist/README.md
+!dist/SHA256SUMS
+!dist/MeetingSummary-0.6.4-test.zip
