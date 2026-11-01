@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "created": "2026-11-01",
+  "total": 30,
+  "development": 22,
+  "holdout": 8,
+  "holdout_used_for_tuning": false,
+  "semantic_review_required_by_human": true,
+  "annotation_policy": "critical_facts must all survive; important_facts coverage >=95%; forbidden_inferences must never appear. reference_summary is an illustrative assistant-authored target requiring human review, not the only acceptable wording. Model sees source only, never annotations. Prior eight development themes are already known. Holdout must not run before writer freeze; if it informs a production change, a new untouched holdout is required and failed results remain archived.",
+  "files": {
+    "development.json": "668ac18aab16258bb76ab1a4a570fafbb92367e2153a5a768b67193be11d0174",
+    "holdout.json": "12a668b254b9bdc6d252ef6679a257fae6cc08bfb96b96049b1eaf140af91cf7"
+  },
+  "annotation_author": "assistant",
+  "annotations_human_reviewed": false
+}
