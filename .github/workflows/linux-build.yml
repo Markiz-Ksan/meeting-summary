@@ -22,7 +22,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: linux-${{ github.ref }}
+  group: linux-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 jobs:
   linux:

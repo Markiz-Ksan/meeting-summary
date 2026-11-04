@@ -40,7 +40,42 @@ def gui_smoke():
     return report
 
 
-def inference_test(path):
+def inference_test(path, report_path=None):
+    """Always preserve diagnostics on failure; full acceptance assertions stay strict."""
+    import json
+    import threading
+    from .pipeline import _process_metrics
+    lock = threading.Lock()
+    began = time.monotonic()
+    state = dict(success=False, diagnostics=[])
+    def persist():
+        if report_path:
+            target = Path(report_path)
+            target.parent.mkdir(parents=True,exist_ok=True)
+            temporary = target.with_suffix(target.suffix+'.pending')
+            temporary.write_text(json.dumps(state,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+            temporary.replace(target)
+    def trace(data):
+        with lock:
+            record = dict(data,elapsed=round(time.monotonic()-began,3))
+            state['diagnostics'].append(record)
+            print('MEETING_DIAGNOSTIC '+json.dumps(record,ensure_ascii=False),flush=True)
+            persist()
+    trace(dict(event='verification_start',**_process_metrics()))
+    try:
+        report = _inference_test(path,trace)
+        with lock:
+            state.update(report,success=True)
+            persist()
+        return state
+    except BaseException as error:
+        with lock:
+            state.update(error_type=type(error).__name__)
+            persist()
+        raise
+
+
+def _inference_test(path, trace):
     """Decode actual supplied synthetic WAV, ground summary, and save/reopen the pair."""
     import subprocess
     import tempfile
@@ -55,8 +90,8 @@ def inference_test(path):
         raise ValueError('Only the authorized tests/meeting-sample.wav fixture is accepted')
     started = time.monotonic()
     files = ensure_models()
-    speech = ProcessEngine('speech', files)
-    summary = ProcessEngine('summary', files)
+    speech = ProcessEngine('speech', files,diagnostic=trace)
+    summary = ProcessEngine('summary', files,diagnostic=trace)
     try:
         speech.prepare()
         summary.prepare()
@@ -65,6 +100,7 @@ def inference_test(path):
         summary.close()
         raise
     models_seconds = time.monotonic()-started
+    trace(dict(event='models_prepared',seconds=round(models_seconds,3)))
     try:
         from .native import executable, environment
         pcm = subprocess.check_output([executable('ffmpeg'),'-v','error','-i',str(path),'-ar','48000','-ac','1',
@@ -80,7 +116,13 @@ def inference_test(path):
             def stop(self):
                 pass
         with tempfile.TemporaryDirectory(prefix='meeting-synthetic-') as root:
-            pipeline = MeetingPipeline(speech, summary, lambda kind, **data: events.append((kind,data)),
+            def pipeline_event(kind, **data):
+                events.append((kind,data))
+                # No transcript, prompt, generated text or local archive paths in trace.
+                safe = {key:value for key,value in data.items() if key in
+                        ('phase','timeout','asr_alive','summary_alive','timestamp','backlog_seconds','incomplete')}
+                trace(dict(event='pipeline_'+kind,**safe))
+            pipeline = MeetingPipeline(speech, summary, pipeline_event,
                                        root=Path(root), capture_factory=SyntheticCapture)
             pipeline.start('system')
             pipeline.stop()

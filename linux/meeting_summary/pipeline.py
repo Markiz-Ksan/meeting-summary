@@ -1,5 +1,6 @@
 """Capture never waits for ASR/LLM: audio is written before queuing disk offsets."""
 import queue
+import os
 import multiprocessing
 import threading
 import time
@@ -9,27 +10,69 @@ from . import shared
 from recent_transcript import RecentTranscript
 
 
-def _engine_process(connection, kind, files, factory):
+def _process_metrics(pid=None):
+    import resource
+    import sys
+    from pathlib import Path
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    pid = pid or os.getpid()
+    result = dict(pid=pid, cpu_seconds=round(usage.ru_utime+usage.ru_stime,3),
+                  max_rss_kib=int(usage.ru_maxrss/(1024 if sys.platform == 'darwin' else 1)),cpu_count=os.cpu_count())
+    if pid != os.getpid(): result.update(cpu_seconds=None,max_rss_kib=None)
+    try:
+        cpu = Path(f'/proc/{pid}/stat').read_text().rpartition(') ')[2].split()
+        result['cpu_seconds'] = round((int(cpu[11])+int(cpu[12]))/os.sysconf('SC_CLK_TCK'),3)
+        for line in Path(f'/proc/{pid}/status').read_text().splitlines():
+            key, _, value = line.partition(':')
+            if key in ('VmRSS','VmSwap'):
+                result[key.lower()+'_kib'] = int(value.split()[0])
+            elif key == 'VmHWM':
+                result['max_rss_kib'] = int(value.split()[0])
+        for line in Path('/proc/meminfo').read_text().splitlines():
+            key, _, value = line.partition(':')
+            if key in ('MemAvailable','SwapFree'):
+                result[key.lower()+'_kib'] = int(value.split()[0])
+    except (OSError,ValueError,IndexError):
+        pass
+    return result
+
+
+def _engine_process(connection, kind, files, factory, diagnostics=False):
     """Native libraries are loaded only in a disposable, dedicated child."""
     try:
         if factory is None:
             from .inference import SpeechEngine, SummaryEngine
             factory = SpeechEngine if kind == 'speech' else SummaryEngine
+        if diagnostics:
+            connection.send(('metric', None, dict(event='model_load_start', **_process_metrics())))
         engine = factory(files)
+        if diagnostics:
+            connection.send(('metric', None, dict(event='model_load_done', **_process_metrics())))
         connection.send(('ready', None, None))
         while True:
             request_id, method, args = connection.recv()
             connection.send(('progress', request_id, None))
+            if diagnostics:
+                def metric(event, **data):
+                    connection.send(('metric',request_id,dict(event=event,**data,**_process_metrics())))
+                engine.diagnostic = metric
+                metric('method_start',method=method)
             try:
                 result = None if method == '__ready__' else getattr(engine, method)(*args)
+                if diagnostics: metric('method_done',method=method)
                 connection.send(('result', request_id, result))
             except ValueError as error:
+                if diagnostics: metric('method_rejected',method=method,error_type=type(error).__name__,detail=str(error)[:400])
                 connection.send(('rejected', request_id, str(error)))
             except BaseException as error:
+                if diagnostics: metric('backend_error',method=method,error_type=type(error).__name__,detail=str(error)[:400])
                 connection.send(('error', request_id, str(error)))
     except (EOFError, BrokenPipeError):
         pass
     except BaseException as error:
+        if diagnostics:
+            try: connection.send(('metric',None,dict(event='startup_error',error_type=type(error).__name__,detail=str(error)[:400],**_process_metrics())))
+            except (EOFError,OSError): pass
         try: connection.send(('error', None, str(error)))
         except (EOFError, OSError): pass
     finally:
@@ -43,8 +86,9 @@ class ProcessEngine:
     killing and joining its old child; replacement never overlaps old weights.
     """
     def __init__(self, kind, files, *, factory=None, startup_timeout=90,
-                 request_timeout=90, recovery_timeout=120, max_restarts=3):
+                 request_timeout=90, recovery_timeout=120, max_restarts=3, diagnostic=None):
         self.kind, self.files, self.factory = kind, files, factory
+        self.diagnostic = diagnostic
         self.startup_timeout, self.request_timeout = startup_timeout, request_timeout
         self.recovery_timeout, self.max_restarts = recovery_timeout, max_restarts
         self.process = self.connection = None
@@ -57,16 +101,21 @@ class ProcessEngine:
         self._sequence = 0
         self._terminal = None
 
+    def _trace(self, event, **data):
+        if self.diagnostic:
+            self.diagnostic(dict(event=event,kind=self.kind,monotonic=time.monotonic(),**data))
+
     def _launch(self):
         context = multiprocessing.get_context('spawn')
         parent, child = context.Pipe()
         process = context.Process(target=_engine_process,
-                                  args=(child, self.kind, self.files, self.factory), daemon=True)
+                                  args=(child, self.kind, self.files, self.factory, self.diagnostic is not None), daemon=True)
         with self._state:
             if self._cancel.is_set():
                 parent.close(); child.close()
                 raise InterruptedError('Обработка остановлена')
             process.start()
+            self._trace("launch",pid=process.pid)
             child.close()
             self.process, self.connection = process, parent
             self.ready = False
@@ -88,6 +137,7 @@ class ProcessEngine:
             self._reader = self._sender = None
             self.ready = False
         if process is not None:
+            self._trace("kill",pid=process.pid,exitcode=process.exitcode,cancelled=self._cancel.is_set())
             if process.is_alive(): process.kill()
             process.join(timeout=2)
             if process.is_alive():
@@ -104,7 +154,13 @@ class ProcessEngine:
 
     def _receive(self, connection, deadline):
         messages = self._messages
+        next_sample = time.monotonic()+5
         while not self._cancel.is_set():
+            if self.diagnostic and time.monotonic() >= next_sample:
+                with self._state:
+                    pid = self.process.pid if self.process else None
+                if pid: self._trace('resource_sample',request_id=self._sequence,**_process_metrics(pid))
+                next_sample = time.monotonic()+5
             remaining = deadline-time.monotonic()
             if remaining <= 0:
                 raise TimeoutError('Обработчик не отвечает; исходная запись сохранена')
@@ -148,30 +204,44 @@ class ProcessEngine:
                     connection = self.connection or self._launch()
                     if not self.ready:
                         startup_deadline = min(deadline or float('inf'), time.monotonic()+self.startup_timeout)
-                        event, _, payload = self._receive(connection, startup_deadline)
+                        while True:
+                            event, _, payload = self._receive(connection, startup_deadline)
+                            if event != 'metric': break
+                            self._trace(**payload)
                         if event != 'ready': raise RuntimeError(str(payload))
                         self.ready = True
+                        self._trace("ready",pid=self.process.pid,request_id=request_id)
                     last_progress = time.monotonic()
                     request_deadline = min(deadline or float('inf'), last_progress+self.request_timeout)
                     self._send(connection, (request_id, method, args), request_deadline)
+                    self._trace("request_sent",request_id=request_id,method=method,attempt=attempt,deadline=request_deadline)
                     accepted = False
                     while True:
                         event, identifier, payload = self._receive(connection, request_deadline)
+                        if event == 'metric':
+                            self._trace(request_id=identifier,**payload)
+                            continue
                         if identifier != request_id: continue
                         if event == 'progress' and not accepted:
                             accepted = True
+                            self._trace("accepted",request_id=request_id,method=method,attempt=attempt)
                             last_progress = time.monotonic()
                             request_deadline = min(deadline or float('inf'), last_progress+self.request_timeout)
-                        elif event == 'result': return payload
+                        elif event == 'result':
+                            self._trace('result',request_id=request_id,method=method,attempt=attempt)
+                            return payload
                         elif event == 'rejected': raise ValueError(payload)
                         elif event == 'error': raise RuntimeError(payload)
                 except ValueError:
+                    self._trace("rejected",request_id=request_id,method=method,attempt=attempt)
                     raise  # Reject a draft without reloading its healthy model.
                 except InterruptedError:
+                    self._trace("cancelled",request_id=request_id,method=method,attempt=attempt)
                     self._kill()
                     raise
                 except (OSError, EOFError, RuntimeError, TimeoutError) as error:
                     if deadline is None: deadline = last_progress+self.recovery_timeout
+                    self._trace("retry",request_id=request_id,method=method,attempt=attempt,error_type=type(error).__name__,remaining=deadline-time.monotonic())
                     self._kill()
                     if self._cancel.is_set(): raise InterruptedError('Обработка остановлена') from error
                     if attempt == self.max_restarts or time.monotonic() >= deadline:
@@ -319,11 +389,16 @@ class MeetingPipeline:
                     self.boundaries.put(self.archive.frames)
                 self.boundaries.put(None)
                 deadline = time.monotonic()+self.drain_timeout
+                self.event('drain', phase='start',timeout=self.drain_timeout)
                 for worker in (self.asr_thread, self.summary_thread):
                     if worker and worker is not threading.current_thread():
                         worker.join(timeout=max(0, deadline-time.monotonic()))
+                self.event('drain',phase='deadline',asr_alive=bool(self.asr_thread and self.asr_thread.is_alive()),summary_alive=bool(self.summary_thread and self.summary_thread.is_alive()))
                 if self.asr_thread and self.asr_thread.is_alive():
                     self.failure = TimeoutError('Расшифровка не завершена; полное аудио сохранено')
+                if self.summary_thread and self.summary_thread.is_alive():
+                    self.failure = self.failure or TimeoutError('Сводка не завершена; полное аудио и расшифровка сохранены')
+                    self.event('error', text='Сводка не завершена: истёк лимит завершения обработки; аудио сохранено')
                 self.aborting.set()
                 if self.failure is None and not (self.summary_thread and self.summary_thread.is_alive()):
                     try:

@@ -26,7 +26,7 @@ def main():
         report = gui_smoke()
     elif args.inference_test:
         from meeting_summary.verification import inference_test
-        report = inference_test(args.inference_test)
+        report = inference_test(args.inference_test,report_path=args.report)
     else:
         from meeting_summary.gui import run
         return run()

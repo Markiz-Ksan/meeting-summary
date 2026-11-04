@@ -2,6 +2,7 @@
 import math
 import os
 import re
+import time
 from . import shared
 
 
@@ -73,8 +74,25 @@ class SummaryEngine:
     def generate(self, messages):
         prompt = chat_prompt(messages)
         # Greedy bounded output matches macOS summary policy; no network/server involved.
+        options = {}
+        diagnostic = getattr(self, 'diagnostic', None)
+        if diagnostic:
+            from llama_cpp import StoppingCriteriaList
+            began = time.monotonic()
+            checkpoints = 0
+            diagnostic('generation_start', prompt_characters=len(prompt),max_tokens=700)
+            def observe(input_ids, logits):
+                nonlocal checkpoints
+                checkpoints += 1
+                if checkpoints == 1 or checkpoints % 16 == 0:
+                    diagnostic('token_progress',checkpoints=checkpoints,input_tokens=len(input_ids),
+                               elapsed=round(time.monotonic()-began,3))
+                return False  # Observation never changes the backend stop decision.
+            options['stopping_criteria'] = StoppingCriteriaList([observe])
         result = self.model.create_completion(prompt, max_tokens=700, temperature=0,
-                                              stop=['<|im_end|>', '<|endoftext|>'], echo=False)
+                                              stop=['<|im_end|>', '<|endoftext|>'], echo=False, **options)
+        if diagnostic:
+            diagnostic('generation_done',elapsed=round(time.monotonic()-began,3),**result.get('usage',{}))
         return result['choices'][0]['text'].strip()
 
     def summarize(self, source):

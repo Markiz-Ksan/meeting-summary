@@ -442,3 +442,92 @@ class DeclaredPulseInputTests(unittest.TestCase):
         self.assertGreaterEqual(len(audio),10000)
         self.assertGreater(math.sqrt(sum(float(x*x) for x in audio)/len(audio)),500,
                            'wall-clock epoch was padded as silence instead of rebased')
+
+class SummaryDrainCompletionTests(unittest.TestCase):
+    def test_cancelled_summary_is_saved_incomplete_with_explicit_drain_reason(self):
+        import threading
+        from meeting_summary.pipeline import MeetingPipeline
+        entered, cancelled = threading.Event(), threading.Event()
+        class Capture:
+            def __init__(self, mode, consume, failed): self.consume=consume
+            def start(self): self.consume(b'\x01\x00'*48000*12)
+            def stop(self): pass
+        class Speech:
+            def transcribe(self, pcm, rate, started): return 'Срок согласован на пятницу.', None
+            def close(self): pass
+        class Summary:
+            def summarize(self, text):
+                entered.set()
+                cancelled.wait(2)
+                raise InterruptedError('Обработка остановлена')
+            def title(self, text): raise AssertionError('Incomplete summary must not generate title')
+            def close(self): cancelled.set()
+        with tempfile.TemporaryDirectory() as root:
+            events=[]
+            pipeline=MeetingPipeline(Speech(),Summary(),lambda kind,**data:events.append((kind,data)),
+                                     Path(root),Capture,drain_timeout=.03)
+            pipeline.start('system')
+            self.assertTrue(entered.wait(2),'Summary did not start')
+            pipeline.stop()
+            self.assertTrue(events[-1][1]['incomplete'])
+            self.assertEqual(json.loads(pipeline.archive.manifest_path.read_text())['state'],'incomplete')
+            errors=[data['text'] for kind,data in events if kind=='error']
+            self.assertTrue(any('Сводка не завершена' in text for text in errors), errors)
+
+class ProcessDiagnosticsTests(unittest.TestCase):
+    def test_correlated_progress_is_reported_without_source_or_extending_timeout(self):
+        import time
+        from meeting_summary.pipeline import ProcessEngine
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root)/'always_hang').touch()
+            trace=[]
+            engine=ProcessEngine('speech',{'fixture':root},factory=RecoveryFixtureEngine,
+                                 startup_timeout=2,request_timeout=.08,recovery_timeout=.2,
+                                 diagnostic=trace.append)
+            try:
+                with self.assertRaises(TimeoutError): engine.transcribe(b'PRIVATE_SOURCE_NEVER_LOG',48000,0)
+            finally: engine.close()
+            names={event['event'] for event in trace}
+            self.assertTrue({'launch','ready','request_sent','accepted','retry','kill'} <= names,names)
+            self.assertNotIn('PRIVATE_SOURCE_NEVER_LOG',json.dumps(trace))
+            self.assertTrue(any(event.get('request_id')==1 for event in trace))
+
+class TokenDiagnosticsTests(unittest.TestCase):
+    def test_observational_token_callback_never_stops_or_changes_generation_policy(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from meeting_summary.inference import SummaryEngine
+        events=[]
+        engine=SummaryEngine.__new__(SummaryEngine)
+        engine.diagnostic=lambda event,**data:events.append((event,data))
+        class Criteria(list):
+            def __call__(self, ids, scores): return any(callback(ids,scores) for callback in self)
+        class Model:
+            def create_completion(self, prompt, **kwargs):
+                self.kwargs=kwargs
+                callback=kwargs['stopping_criteria']
+                for count in range(50,84):
+                    if callback(range(count),None): raise AssertionError('Instrumentation stopped generation')
+                return {'choices':[{'text':' Итог. '}],'usage':{'prompt_tokens':50,'completion_tokens':33}}
+        engine.model=Model()
+        with patch.dict(sys.modules,{'llama_cpp':SimpleNamespace(StoppingCriteriaList=Criteria)}):
+            self.assertEqual(engine.generate([{'role':'user','content':'PRIVATE_DATA'}]),'Итог.')
+        self.assertEqual(engine.model.kwargs['max_tokens'],700)
+        self.assertEqual(engine.model.kwargs['temperature'],0)
+        self.assertEqual(engine.model.kwargs['stop'],['<|im_end|>','<|endoftext|>'])
+        self.assertNotIn('PRIVATE_DATA',json.dumps(events))
+        self.assertEqual(events[-1][1]['completion_tokens'],33)
+        self.assertTrue(any(name=='token_progress' for name,data in events))
+
+class InferenceFailureEvidenceTests(unittest.TestCase):
+    def test_rejected_fixture_still_writes_failure_evidence_without_model_load(self):
+        from meeting_summary.verification import inference_test
+        with tempfile.TemporaryDirectory() as root:
+            source=Path(root)/'not-authorized.wav'; source.write_bytes(b'not an authorized fixture')
+            report=Path(root)/'report.json'
+            with self.assertRaises(ValueError): inference_test(source,report_path=report)
+            evidence=json.loads(report.read_text())
+            self.assertFalse(evidence['success'])
+            self.assertEqual(evidence['error_type'],'ValueError')
+            self.assertTrue(evidence['diagnostics'])
+            self.assertNotIn('not an authorized fixture',report.read_text())

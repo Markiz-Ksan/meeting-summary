@@ -228,7 +228,7 @@ class Controller(QObject):
             self.pipeline = None
             self.engines = None
             self.window.set_busy(False)
-            self.window.status.setText(('Расшифровка неполная; полное аудио сохранено' if data.get('incomplete') else 'Аудио и текст сохранены') if event == 'saved' else 'Ошибка запуска: '+data['text'])
+            self.window.status.setText(('Обработка не завершена; полное аудио сохранено' if data.get('incomplete') else 'Аудио и текст сохранены') if event == 'saved' else 'Ошибка запуска: '+data['text'])
             if self.closing:
                 self.app.quit()
 
