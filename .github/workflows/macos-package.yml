@@ -1,5 +1,8 @@
-name: Manual Apple Silicon build only
+name: Apple Silicon build only
 on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/macos-package.yml']
   workflow_dispatch:
     inputs:
       build_number:
@@ -14,10 +17,11 @@ concurrency:
   cancel-in-progress: false
 jobs:
   package:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 45
     env:
-      MEETING_BUILD_NUMBER: ${{ inputs.build_number }}
+      MEETING_BUILD_NUMBER: ${{ inputs.build_number || '18' }}
       PYTHONDONTWRITEBYTECODE: '1'
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
@@ -134,7 +138,7 @@ jobs:
       - name: Retain only verified ZIP, checksum and sanitized software receipts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: macos-arm64-build-${{ inputs.build_number }}-${{ github.run_number }}
+          name: macos-arm64-build-${{ env.MEETING_BUILD_NUMBER }}-${{ github.run_number }}
           path: |
             ${{ runner.temp }}/mac-artifacts/*.zip
             ${{ runner.temp }}/mac-artifacts/SHA256SUMS

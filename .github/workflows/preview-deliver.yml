@@ -1,5 +1,8 @@
 name: Attach BUILD ONLY preview to existing private build18 draft
 on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/preview-deliver.yml']
   workflow_dispatch:
     inputs:
       platform:
@@ -29,7 +32,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   attach-preview:
-    if: github.repository == 'Markiz-Ksan/meeting-summary' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'Markiz-Ksan/meeting-summary' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
