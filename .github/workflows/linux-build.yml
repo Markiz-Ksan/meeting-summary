@@ -5,7 +5,7 @@ on:
       inference:
         description: Run genuine Parakeet + Qwen3.5-9B CPU inference on shipped synthetic fixture
         type: boolean
-        default: true
+        default: false
   push:
     paths:
       - 'linux/**'

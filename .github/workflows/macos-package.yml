@@ -1,0 +1,144 @@
+name: Manual Apple Silicon build only
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: 'Positive integer for the reviewed candidate; model validation is not run.'
+        type: string
+        required: true
+        default: '18'
+permissions:
+  contents: read
+concurrency:
+  group: macos-package-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      MEETING_BUILD_NUMBER: ${{ inputs.build_number }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Native ARM preflight
+        run: |
+          test "$(uname -m)" = arm64
+          uname -a
+          sw_vers
+          df -h "$RUNNER_TEMP"
+          xcrun --find swiftc
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Validate build input and OS before dependency downloads
+        run: |
+          python -B - <<'PY'
+          import os, platform, re
+          assert re.fullmatch(r'[1-9][0-9]*', os.environ['MEETING_BUILD_NUMBER']), 'Invalid build number'
+          assert platform.machine() == 'arm64'
+          assert tuple(map(int, platform.mac_ver()[0].split('.')[:2])) >= (14, 4)
+          PY
+      - name: Factory software checks; no models or audio
+        run: python -B tests/test_prepare_macos_runtime.py
+      - name: Prepare isolated pinned Python and verified software wheels
+        run: |
+          python -B scripts/prepare_macos_runtime.py \
+            --plan packaging/runtime-factory.lock.json --output "$RUNNER_TEMP/runtime-source"
+      - name: Compile reviewed source and package with imports only
+        run: |
+          python -B scripts/package_macos.py \
+            --runtime-source "$RUNNER_TEMP/runtime-source" \
+            --worker-source "$GITHUB_WORKSPACE/src" \
+            --version 0.7.0 --build "$MEETING_BUILD_NUMBER" --sign - \
+            --output "$RUNNER_TEMP/mac-build/MeetingSummary-0.7.0-beta-macos-arm64.zip"
+      - name: Verify the saved archive and emit sanitized receipts
+        run: |
+          python -B - <<'PY'
+          import hashlib, importlib.util, json, os, plistlib, runpy, shutil, subprocess, tempfile, zipfile
+          from pathlib import Path
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          temporary = Path(os.environ['RUNNER_TEMP'])
+          source = temporary/'mac-build/MeetingSummary-0.7.0-beta-macos-arm64.zip'
+          output = temporary/'mac-artifacts'; output.mkdir()
+          names = ['recent_transcript.py', 'session_title.py', 'summary_writer.py', 'transcript_log.py', 'worker.py']
+          hashes = {name: hashlib.sha256((root/'src'/name).read_bytes()).hexdigest() for name in names}
+          spec = importlib.util.spec_from_file_location('packager', root/'scripts/package_macos.py')
+          packager = importlib.util.module_from_spec(spec); spec.loader.exec_module(packager)
+          with zipfile.ZipFile(source, metadata_encoding='utf-8') as archive:
+              assert archive.testzip() is None
+              assert all(not Path(name).is_absolute() and '..' not in Path(name).parts for name in archive.namelist())
+              base = 'Сводка встречи.app/Contents/'
+              info = plistlib.loads(archive.read(base+'Info.plist'))
+              assert info['CFBundleVersion'] == os.environ['MEETING_BUILD_NUMBER']
+              assert info['LSMinimumSystemVersion'] == '14.4'
+              manifest = json.loads(archive.read(base+'Resources/bundle-manifest.json'))
+              assert manifest['workers'] == hashes and not manifest['models_bundled']
+              assert manifest['worker_id'] == hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()[:20]
+              for name, expected in hashes.items():
+                  assert hashlib.sha256(archive.read(base+'Resources/workers/'+name)).hexdigest() == expected
+          with tempfile.TemporaryDirectory(prefix='meeting-saved-archive-', dir=temporary) as folder:
+              unpacked = Path(folder)
+              subprocess.run(['ditto', '-x', '-k', str(source), str(unpacked)], check=True)
+              app = unpacked/'Сводка встречи.app'
+              subprocess.run(['codesign', '--verify', '--deep', '--strict', str(app)], check=True)
+              signature = subprocess.run(['codesign', '-d', '--verbose=2', str(app)], capture_output=True, text=True, check=True).stderr
+              assert 'Signature=adhoc' in signature
+              native = packager.audit(app)
+              assert native
+              resources = app/'Contents/Resources'
+              home = unpacked/'home'; home.mkdir()
+              env = dict(HOME=str(home), PATH='/usr/bin:/bin', TMPDIR=str(unpacked), PYTHONNOUSERSITE='1',
+                         PYTHONDONTWRITEBYTECODE='1', HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1',
+                         HF_HUB_DISABLE_TELEMETRY='1', NUMBA_CACHE_DIR=str(unpacked/'numba'))
+              code = '''import runpy,sys
+          def deny(event,args):
+              if event in ('socket.connect','socket.getaddrinfo'): raise RuntimeError('Network forbidden during saved-archive import check')
+          sys.addaudithook(deny)
+          sys.argv=[sys.argv[1],'--self-test']
+          runpy.run_path(sys.argv[0],run_name='__main__')
+          '''
+              result = subprocess.run([str(resources/'runtime/python/bin/python3.12'), '-I', '-B', '-c', code,
+                                       str(resources/'bootstrap.py')], env=env, capture_output=True, text=True, check=True, timeout=120)
+              smoke = json.loads(result.stdout.strip().splitlines()[-1])
+              assert smoke['python'] == '3.12.13' and smoke['architecture'] == 'arm64'
+              assert smoke['models_loaded'] is False and smoke['external_site_packages'] == []
+              smoke.pop('prefix', None)
+          factory = json.loads((temporary/'runtime-source/runtime-factory-receipt.json').read_text())
+          packaged = json.loads(source.with_suffix('.receipt.json').read_text())
+          assert factory['complete'] and not factory['model_or_audio_operations']
+          assert packaged['no_inference_or_capture'] and packaged['worker_help'] and not packaged['notarized']
+          common = dict(format=1, commit=os.environ['GITHUB_SHA'], build=os.environ['MEETING_BUILD_NUMBER'],
+                        model_validation='not_run', audio_validation='not_run', notarized=False, signing='adhoc',
+                        semantic_acceptance='not_evaluated')
+          def save(name, **values):
+              (output/name).write_text(json.dumps(dict(common, **values), ensure_ascii=False, indent=2)+'\n')
+          save('runtime-factory-receipt.json', complete=True, plan=factory['plan'],
+               native_dependencies=factory['native_dependencies'], retained_license_files=factory['retained_license_files'],
+               import_smoke={k:v for k,v in factory['import_smoke'].items() if k not in ('prefix','base_prefix')})
+          save('package-receipt.json', version=packaged['version'], worker_id=manifest['worker_id'], workers=hashes,
+               worker_help=True, import_smoke=smoke)
+          artifact = output/source.name; shutil.copy2(source, artifact)
+          sha = hashlib.sha256(artifact.read_bytes()).hexdigest()
+          assert sha == packaged['sha256']
+          save('saved-archive-receipt.json', artifact=artifact.name, sha256=sha, bytes=artifact.stat().st_size,
+               signature_verified=True, minimum_macos='14.4', native_dependencies=native, import_smoke=smoke,
+               workers=hashes, network_during_import_check='denied')
+          (output/'SHA256SUMS').write_text(sha+'  '+artifact.name+'\n')
+          PY
+      - name: Retain only verified ZIP, checksum and sanitized software receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-arm64-build-${{ inputs.build_number }}-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/mac-artifacts/*.zip
+            ${{ runner.temp }}/mac-artifacts/SHA256SUMS
+            ${{ runner.temp }}/mac-artifacts/*-receipt.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

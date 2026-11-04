@@ -1,3 +1,5 @@
+> Build 18 is a build-only test candidate. Neural inference, model quality and audio acceptance have not been run for this candidate. A successful software build is not full application acceptance.
+
 # Meeting Summary — 0.7.0 beta
 
 Local speech recognition, a full audio/transcript pair, and a short floating summary of the latest five minutes. System audio, microphone, or both can be selected. No meeting content is uploaded to a cloud API.
@@ -13,3 +15,5 @@ Full WAV and TXT files share a timestamp, neutral topic and unique session ID in
 Windows is deferred. See [Russian documentation](README.md), [privacy](PRIVACY.md), and [third-party licenses](THIRD_PARTY_NOTICES.md).
 
 The project's original code, documentation and graphics use [CC0](LICENSE). Dependencies and models retain their licenses. The synthetic WAV is authorized for this private package; public CC0 redistribution rights are not asserted.
+
+Clean-source packaging uses a pinned standalone Python runtime and checked wheel digests; see [runtime-factory.md](packaging/runtime-factory.md). Preview files remain in private draft [Releases](https://github.com/Markiz-Ksan/meeting-summary/releases). Developer ID/notarization and final hardware/model acceptance remain open.
