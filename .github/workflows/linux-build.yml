@@ -40,12 +40,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: linux/requirements*.txt
+      - uses: actions/cache/restore@v4
+        id: pip-wheels
+        with:
+          path: ~/.cache/pip
+          key: linux-cpu-v1-${{ runner.arch }}-py312-${{ hashFiles('linux/requirements*.txt') }}
       - name: System build and desktop dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build patchelf ffmpeg pulseaudio pulseaudio-utils xvfb xauth libgl1 libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
+      - name: Minimal dependency for early real capture diagnostics
+        run: python -m pip install numpy==2.2.6
+      - name: Genuine virtual system and microphone capture
+        id: capture
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          pulseaudio --start --exit-idle-time=-1
+          MEETING_TEST_PULSE=1 MEETING_CAPTURE_REPORT="$PWD/linux-capture.json" python -m unittest discover -s linux/tests -p 'test_capture_pulse.py' -v 2>&1 | tee linux-capture.log
+      - name: Preserve capture evidence immediately, including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-capture-diagnostics-${{ github.run_number }}
+          path: |
+            linux-capture.json
+            linux-capture.log
+          if-no-files-found: warn
+          retention-days: 14
       - name: Extra swap for 9B CPU inference on small private runners
         if: github.event_name == 'workflow_dispatch' && inputs.inference
         run: |
@@ -60,39 +82,91 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r linux/requirements-build.txt
           python -m pip check
+      - name: Preserve verified dependency wheels before any later test failure
+        if: steps.pip-wheels.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ steps.pip-wheels.outputs.cache-primary-key }}
       - name: Portable and shared regressions
+        id: regressions
+        continue-on-error: true
         run: |
           python -m unittest discover -s tests -p 'test_*.py' -v
           python -m unittest discover -s linux/tests -p 'test_linux_core.py' -v
-      - name: Genuine virtual system and microphone capture
-        run: |
-          pulseaudio --start --exit-idle-time=-1
-          MEETING_TEST_PULSE=1 MEETING_CAPTURE_REPORT="$PWD/linux-capture.json" python -m unittest discover -s linux/tests -p 'test_capture_pulse.py' -v
       - name: Overlay GUI and stale-summary/scroll behavior on X11
+        id: gui
+        continue-on-error: true
         run: MEETING_GUI_SCREENSHOT=linux-gui.png xvfb-run -a python linux/entrypoint.py --gui-smoke --report linux-gui.json
-      - name: Cache pinned model artifacts
+      - name: Restore pinned model artifacts
         if: github.event_name == 'workflow_dispatch' && inputs.inference
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
+        id: models
         with:
           path: .linux-test-data/meeting-summary/models
           key: linux-models-${{ hashFiles('linux/meeting_summary/models.json') }}
-      - name: Real Parakeet ONNX and Qwen3.5-9B inference, pair save/load
+      - name: Download and verify pinned models
+        id: download
         if: github.event_name == 'workflow_dispatch' && inputs.inference
-        run: |
-          python linux/entrypoint.py --download-models
-          python linux/entrypoint.py --inference-test tests/meeting-sample.wav --report linux-inference.json
+        continue-on-error: true
+        run: python linux/entrypoint.py --download-models
+      - name: Preserve verified models before inference or package failures
+        if: steps.download.outcome == 'success' && steps.models.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .linux-test-data/meeting-summary/models
+          key: ${{ steps.models.outputs.cache-primary-key }}
+      - name: Real Parakeet ONNX and Qwen3.5-9B inference, pair save/load
+        id: inference
+        if: steps.download.outcome == 'success'
+        continue-on-error: true
+        run: python linux/entrypoint.py --inference-test tests/meeting-sample.wav --report linux-inference.json
       - name: Build standalone DEB and AppImage
+        id: build
+        continue-on-error: true
         env:
           OUTPUT: ${{ github.workspace }}/linux-artifacts
-          RUN_INFERENCE_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.inference && '1' || '0' }}
+          RUN_INFERENCE_TEST: ${{ steps.inference.outcome == 'success' && '1' || '0' }}
         run: bash linux/build.sh
       - name: Install DEB and verify saved artifact
+        id: install
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
         run: |
           sudo apt-get install -y ./linux-artifacts/*.deb
           /usr/bin/meeting-summary --version
           xvfb-run -a /usr/bin/meeting-summary --gui-smoke --report linux-artifacts/installed-gui.json
           APPIMAGE_EXTRACT_AND_RUN=1 ./linux-artifacts/*.AppImage --version
           QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 ./linux-artifacts/*.AppImage --gui-smoke --report linux-artifacts/appimage-gui.json
+      - name: Explicit final gate; independent failures never become a green release
+        if: always()
+        env:
+          CAPTURE: ${{ steps.capture.outcome }}
+          REGRESSIONS: ${{ steps.regressions.outcome }}
+          GUI: ${{ steps.gui.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          INSTALL: ${{ steps.install.outcome }}
+          REQUIRE_INFERENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.inference && '1' || '0' }}
+          DOWNLOAD: ${{ steps.download.outcome }}
+          INFERENCE: ${{ steps.inference.outcome }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          required = ['CAPTURE', 'REGRESSIONS', 'GUI', 'BUILD', 'INSTALL']
+          if os.environ['REQUIRE_INFERENCE'] == '1':
+              required += ['DOWNLOAD', 'INFERENCE']
+          results = {name: os.environ.get(name, 'missing') for name in required}
+          output = Path('linux-artifacts/ci-gates.json')
+          output.parent.mkdir(parents=True, exist_ok=True)
+          report = dict(checks=results, inference_requested=os.environ['REQUIRE_INFERENCE'] == '1',
+                        release_eligible=os.environ['REQUIRE_INFERENCE'] == '1' and all(value == 'success' for value in results.values()))
+          output.write_text(json.dumps(report, indent=2) + '\n')
+          print(json.dumps(report, indent=2))
+          failed = [name for name, outcome in results.items() if outcome != 'success']
+          if failed:
+              raise SystemExit('Required checks failed or skipped: ' + ', '.join(failed))
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -100,6 +174,7 @@ jobs:
           path: |
             linux-artifacts/
             linux-capture.json
+            linux-capture.log
             linux-gui.json
             linux-gui.png
             linux-inference.json
