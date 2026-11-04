@@ -21,7 +21,7 @@
     "src/WorkerWatchdog.swift": "8e977ce4223b4b02d8aafe3a8cdb85b56bce1b5af06024618b678c36a7e05b94",
     "src/recent_transcript.py": "4c0e43093cc260ba01b2eac0e5949f93c5976c5f5c2893866064b21f34653543",
     "src/session_title.py": "f901e22146707d4fae3632b8e84fe63adfafe5432db8128195b40eae48781689",
-    "src/summary_writer.py": "6d20bd25559dbf9643b906cffda5ed20d8b24bb6796316096404670e83b1ca9b",
+    "src/summary_writer.py": "3b57f195d1242abc7ee32d7b0d64482cddb4c2d40a58ef5a153cc52f4902ec5f",
     "src/transcript_log.py": "a6f15f2e600ec132e4c13a8074e7e9fc839ecb97f7a9cc1d40ddc699548ce992",
     "src/worker.py": "844d671ff7eedcdc71413eec383d38d37ec377f30098e70ac33ae43aa8cabedd"
   }

@@ -97,7 +97,7 @@ def main():
     p.add_argument('--worker-source', type=Path, default=CANONICAL/'src')
     p.add_argument('--output', type=Path, default=PROJECT/'.build.noindex/meeting-overlay-arm64-candidate.zip')
     p.add_argument('--version', default='0.7.0')
-    p.add_argument('--build', default='16')
+    p.add_argument('--build', default='17')
     p.add_argument('--sign', default='-', help='Developer ID Application identity for distribution; - for local candidate')
     p.add_argument('--models', type=Path, help='Optional exact verified model files for fully offline package')
     p.add_argument('--notary-profile', help='Explicit existing notarytool keychain profile; requires Developer ID signing')

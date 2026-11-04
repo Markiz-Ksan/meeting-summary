@@ -124,6 +124,9 @@ def grounded_summary(raw, source):
         if not numbers(text).issubset(numbers(quote)):
             raise ValueError('Черновик содержит неподтверждённый пункт')
         preserve_statement_scope(normalize(text), quote)
+        for plural, singular in ((r'обеща(?:ют|ем)', 'обещает'), (r'гарантиру(?:ют|ем)', 'гарантирует'), (r'подтвержда(?:ют|ем)', 'подтверждает')):
+            if re.search(r'\bне\s+' + plural + r'\b', quote) and re.search(r'\bне\s+' + singular + r'\b', normalize(text)) and not re.search(r'\bне\s+' + singular + r'\b', quote):
+                raise ValueError('Не назначай нового субъекта обещания или подтверждения. Сохрани исходную безличную или множественную форму, если конкретный обещающий не назван.')
         if re.search(r'\bнесостоявш\w*', normalize(text)) and not re.search(r'\b(?:не\s+состоя\w*|несостоявш\w*)', quote):
             raise ValueError('Не утверждай, что событие не состоялось. Не прошли тесты не означает, что тесты не проводились. Сохрани исходную формулировку о результате без нового уточнения.')
         decision = r'\b(?:решили|утвердили|согласовали|выбрали|приняли решение)\b'

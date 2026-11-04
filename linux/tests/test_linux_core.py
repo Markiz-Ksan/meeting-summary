@@ -371,3 +371,44 @@ class WorkerPipeBackpressureTests(unittest.TestCase):
             finally: engine.close()
             for pid in map(int,(Path(root)/'pids').read_text().splitlines()):
                 with self.assertRaises(ProcessLookupError): os.kill(pid,0)
+
+class LiveInputFragmentTests(unittest.TestCase):
+    def test_each_live_input_requests_a_bounded_50ms_pcm_fragment(self):
+        from meeting_summary.capture import capture_command
+        for mode in ['system','microphone','both']:
+            command=capture_command(mode,'speaker.monitor','microphone')
+            count=2 if mode=='both' else 1
+            self.assertEqual(command.count('-fragment_size'),count)
+            began=0
+            for index,part in enumerate(command):
+                if part=='-i':
+                    options=command[began:index]
+                    self.assertIn('-fragment_size',options)
+                    self.assertEqual(options[options.index('-fragment_size')+1],'9600')
+                    began=index+2
+            self.assertNotIn('nobuffer',command, 'initial speech packets must be retained')
+
+class CaptureDiagnosticTests(unittest.TestCase):
+    def test_stopped_stream_retains_actual_stderr_pcm_counts_and_first_delivery_time(self):
+        import subprocess,sys,threading,time
+        from meeting_summary.capture import PulseCapture
+        blocks,errors=[],[]
+        capture=PulseCapture('system',blocks.append,errors.append)
+        capture.command=['synthetic-stdout-fixture']
+        capture.started_at=time.monotonic()
+        capture.process=subprocess.Popen([sys.executable,'-c',
+            "import sys;sys.stdout.buffer.write(b'\\x01\\x00'*48017);sys.stderr.write('synthetic diagnostic')"],
+            stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        capture.stopping=True
+        capture.error_reader=threading.Thread(target=capture._read_errors)
+        capture.error_reader.start()
+        capture._read()
+        capture.stop()
+        data=capture.diagnostic_snapshot()
+        self.assertFalse(errors)
+        self.assertEqual(b''.join(blocks),b'\x01\x00'*48017)
+        self.assertEqual(data['pcm_bytes'],96034)
+        self.assertGreaterEqual(data['first_pcm_seconds'],0)
+        self.assertIn('synthetic diagnostic',data['stderr_tail'])
+        self.assertEqual(data['returncode'],0)
+        self.assertFalse(data['forced_kill'])

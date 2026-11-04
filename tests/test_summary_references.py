@@ -206,3 +206,13 @@ class ReferenceTests(unittest.TestCase):
         raw='[{"summary":"Питание отключилось, поэтому сервер недоступен.","sources":[1]}]'
         result=write_summary_with(lambda _:raw,'Сервер недоступен из-за отключения питания.')
         self.assertIn('поэтому',result)
+
+    def test_unattributed_promise_cannot_be_assigned_to_an_object_of_a_reply(self):
+        raw='[{"summary":"Склад не обещает доставку до ответа.","sources":[1]}]'
+        with self.assertRaises(ValueError):write_summary_with(lambda _:raw,'До ответа склада доставку не обещают.')
+        raw='[{"summary":"Доставку не обещают до ответа склада.","sources":[1]}]'
+        self.assertIn('не обещают',write_summary_with(lambda _:raw,'До ответа склада доставку не обещают.'))
+
+    def test_explicit_singular_promising_actor_is_preserved(self):
+        raw='[{"summary":"Склад пока не обещает доставку.","sources":[1]}]'
+        self.assertEqual(write_summary_with(lambda _:raw,'Склад пока не обещает доставку.'),'• Склад пока не обещает доставку.')
