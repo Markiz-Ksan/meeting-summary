@@ -316,6 +316,8 @@ class PipelineIsolationTests(unittest.TestCase):
             self.assertEqual(events[-1][0], 'saved')
             self.assertTrue(events[-1][1]['incomplete'])
             self.assertEqual(json.loads(pipeline.archive.manifest_path.read_text())['state'], 'incomplete')
+            self.assertFalse(any(kind=='speech_released_before_summary' for kind,data in events),
+                             'An ASR still alive at the deadline must not take the drained path')
             for pid in map(int,(fixture/'pids').read_text().splitlines()):
                 with self.assertRaises(ProcessLookupError): os.kill(pid,0)
 
@@ -531,3 +533,93 @@ class InferenceFailureEvidenceTests(unittest.TestCase):
             self.assertEqual(evidence['error_type'],'ValueError')
             self.assertTrue(evidence['diagnostics'])
             self.assertNotIn('not an authorized fixture',report.read_text())
+
+class StopMemoryReleaseTests(unittest.TestCase):
+    def test_final_asr_ack_precedes_speech_release_which_unblocks_summary(self):
+        import os, threading
+        from types import SimpleNamespace
+        from meeting_summary.pipeline import MeetingPipeline
+        final_entered, final_ack, speech_released = (threading.Event() for _ in range(3))
+        first, tail = b'\x02\x00'*48000*12, b'\x03\x00'*17
+        class Capture:
+            def __init__(self, mode, consume, failed): self.consume=consume
+            def start(self): self.consume(first)
+            def stop(self): self.consume(tail)
+        class Speech:
+            process=SimpleNamespace(pid=os.getpid())
+            calls=closes=0
+            def transcribe(self, pcm, rate, started):
+                self.calls+=1
+                if len(pcm)>len(first):
+                    final_entered.set()
+                    if not final_ack.wait(2): raise RuntimeError('Final fixture ACK not released')
+                    return 'Последний фрагмент подтверждён.', None
+                return 'Первый фрагмент подтверждён.', None
+            def close(self):
+                if not final_ack.is_set() or pipeline.asr_thread.is_alive():
+                    raise AssertionError('ASR was closed before its last acknowledged chunk drained')
+                self.closes+=1
+                speech_released.set()
+        class Summary:
+            def summarize(self, text):
+                if not speech_released.wait(2): raise RuntimeError('Speech model memory not released')
+                return '• Фрагменты подтверждены.'
+            def title(self, text): return None
+            def close(self): pass
+        with tempfile.TemporaryDirectory() as root:
+            events=[];speech=Speech()
+            pipeline=MeetingPipeline(speech,Summary(),lambda kind,**data:events.append((kind,data)),
+                                     Path(root),Capture,drain_timeout=.3)
+            pipeline.start('system')
+            control=threading.Thread(target=pipeline.stop)
+            control.start()
+            try:
+                self.assertTrue(final_entered.wait(2),'Final ASR chunk was not delivered')
+                self.assertFalse(speech_released.is_set(),'Speech closed before final ACK')
+                with wave.open(str(pipeline.archive.audio_path)) as saved:
+                    self.assertEqual(saved.readframes(saved.getnframes()),first+tail)
+                final_ack.set()
+                control.join(timeout=3)
+                self.assertFalse(control.is_alive(),'Stop did not finish')
+                self.assertEqual(speech.calls,2)
+                self.assertFalse(events[-1][1]['incomplete'])
+                self.assertEqual(json.loads(pipeline.archive.manifest_path.read_text())['state'],'saved')
+                self.assertIn('Последний фрагмент подтверждён.',pipeline.archive.transcript_path.read_text())
+                self.assertTrue(any(kind=='summary' for kind,data in events))
+                released=[data for kind,data in events if kind=='speech_released_before_summary']
+                self.assertEqual(len(released),1)
+                self.assertEqual(released[0]['pid'],os.getpid())
+                self.assertGreater(released[0]['remaining_seconds'],0)
+                self.assertLessEqual(released[0]['remaining_seconds'],.3)
+                self.assertEqual(speech.closes,2,'Final repeated close must remain harmless')
+            finally:
+                final_ack.set();speech_released.set();control.join(timeout=3)
+
+    def test_speech_reaping_uses_remaining_global_drain_budget(self):
+        from unittest.mock import patch
+        from meeting_summary.pipeline import MeetingPipeline
+        from meeting_summary.archive import SessionArchive
+        now=[100.0];summary_joins=[]
+        class Speech:
+            def close(self): now[0]+=30
+        class Summary:
+            def close(self): pass
+        class ASR:
+            def join(self,timeout): now[0]+=50
+            def is_alive(self): return False
+        class PendingSummary:
+            def join(self,timeout): summary_joins.append(timeout)
+            def is_alive(self): return True
+        with tempfile.TemporaryDirectory() as root:
+            events=[]
+            pipeline=MeetingPipeline(Speech(),Summary(),lambda kind,**data:events.append((kind,data)),
+                                     Path(root),drain_timeout=120)
+            pipeline.archive=SessionArchive(Path(root))
+            pipeline.archive.append(b'\x01\x00')
+            pipeline.asr_thread,pipeline.summary_thread=ASR(),PendingSummary()
+            with patch('meeting_summary.pipeline.time.monotonic',side_effect=lambda:now[0]):
+                pipeline.stop()
+            self.assertEqual(summary_joins[0],40,'Speech reap must consume, not reset, the120s deadline')
+            released=[data for kind,data in events if kind=='speech_released_before_summary']
+            self.assertEqual(released[0]['remaining_seconds'],40)
+            self.assertTrue(events[-1][1]['incomplete'])

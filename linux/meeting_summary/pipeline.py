@@ -390,9 +390,21 @@ class MeetingPipeline:
                 self.boundaries.put(None)
                 deadline = time.monotonic()+self.drain_timeout
                 self.event('drain', phase='start',timeout=self.drain_timeout)
-                for worker in (self.asr_thread, self.summary_thread):
-                    if worker and worker is not threading.current_thread():
-                        worker.join(timeout=max(0, deadline-time.monotonic()))
+                if self.asr_thread and self.asr_thread is not threading.current_thread():
+                    self.asr_thread.join(timeout=max(0, deadline-time.monotonic()))
+                if (self.asr_thread and not self.asr_thread.is_alive() and self.failure is None
+                        and hasattr(self.speech, 'close')):
+                    # Every queued chunk and its TXT update have drained. Reap the
+                    # idle speech model before the LLM waits; share the same deadline.
+                    process = getattr(self.speech, 'process', None)
+                    pid = process.pid if process is not None else None
+                    self.speech.close()
+                    released = dict(pid=pid,remaining_seconds=max(0,deadline-time.monotonic()))
+                    self.event('speech_released_before_summary', **released)
+                    trace = getattr(self.speech, '_trace', None)
+                    if trace: trace('speech_released_before_summary', **released)
+                if self.summary_thread and self.summary_thread is not threading.current_thread():
+                    self.summary_thread.join(timeout=max(0, deadline-time.monotonic()))
                 self.event('drain',phase='deadline',asr_alive=bool(self.asr_thread and self.asr_thread.is_alive()),summary_alive=bool(self.summary_thread and self.summary_thread.is_alive()))
                 if self.asr_thread and self.asr_thread.is_alive():
                     self.failure = TimeoutError('Расшифровка не завершена; полное аудио сохранено')
