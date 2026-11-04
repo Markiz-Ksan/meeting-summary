@@ -1,0 +1,185 @@
+name: Apply approved source snapshot
+on:
+  workflow_dispatch:
+    inputs:
+      archive_sha256:
+        description: Exact approved SHA-256 of root source-snapshot.zip
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: apply-source-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  apply:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Validate exact archive, apply whitelist, and retain history
+        env:
+          ARCHIVE_SHA256: ${{ inputs.archive_sha256 }}
+        run: |
+          python3 - <<'PY'
+          """Fail-closed validator for the explicitly approved private source snapshot."""
+          import hashlib
+          import json
+          import os
+          from pathlib import Path, PurePosixPath
+          import re
+          import stat
+          import tempfile
+          import unicodedata
+          import zipfile
+          
+          MAX_ARCHIVE = 25 * 1024 * 1024
+          MAX_FILES = 500
+          MAX_EXPANDED = 128 * 1024 * 1024
+          MAX_FILE = 32 * 1024 * 1024
+          METADATA = 'SOURCE-MANIFEST.json'
+          ALLOWED = ['.gitattributes', '.gitignore', 'CHANGELOG.md', 'CONTRIBUTING.md', 'LICENSE', 'PRIVACY.md', 'README.en.md', 'README.md', 'RELEASE_NOTES_DRAFT.md', 'ROADMAP.md', 'THIRD_PARTY_NOTICES.md', 'VERSION', 'assets/MeetingOverlay-preview.png', 'assets/MeetingOverlay.icns', 'assets/MeetingOverlay.iconset/icon_128x128.png', 'assets/MeetingOverlay.iconset/icon_128x128@2x.png', 'assets/MeetingOverlay.iconset/icon_16x16.png', 'assets/MeetingOverlay.iconset/icon_16x16@2x.png', 'assets/MeetingOverlay.iconset/icon_256x256.png', 'assets/MeetingOverlay.iconset/icon_256x256@2x.png', 'assets/MeetingOverlay.iconset/icon_32x32.png', 'assets/MeetingOverlay.iconset/icon_32x32@2x.png', 'assets/MeetingOverlay.iconset/icon_512x512.png', 'assets/MeetingOverlay.iconset/icon_512x512@2x.png', 'build.sh', 'docs/ARCHITECTURE.md', 'docs/SETUP.md', 'docs/TESTING.md', 'docs/assets/icon.png', 'docs/assets/overview.svg', 'docs/source-snapshot.json', 'linux/README.md', 'linux/THIRD_PARTY.md', 'linux/build.sh', 'linux/bundle_native.py', 'linux/entrypoint.py', 'linux/meeting-summary.desktop', 'linux/meeting-summary.svg', 'linux/meeting_summary/__init__.py', 'linux/meeting_summary/archive.py', 'linux/meeting_summary/capture.py', 'linux/meeting_summary/gui.py', 'linux/meeting_summary/inference.py', 'linux/meeting_summary/models.json', 'linux/meeting_summary/models.py', 'linux/meeting_summary/native.py', 'linux/meeting_summary/pipeline.py', 'linux/meeting_summary/shared.py', 'linux/meeting_summary/verification.py', 'linux/requirements-build.txt', 'linux/requirements.txt', 'linux/tests/test_capture_pulse.py', 'linux/tests/test_linux_core.py', 'packaging/README.md', 'packaging/RuntimeBootstrapChecks.swift', 'packaging/bootstrap.py', 'packaging/licenses/APACHE-2.0.txt', 'packaging/licenses/MODEL-NOTICES.txt', 'packaging/licenses/PYTHON-3.12.txt', 'packaging/model-overrides/speech-4bit/config.json', 'packaging/model-overrides/speech-4bit/tokenizer.model', 'packaging/model-overrides/speech-4bit/vocab.txt', 'packaging/model-overrides/summary-4b/chat_template.jinja', 'packaging/model-overrides/summary-4b/config.json', 'packaging/model-overrides/summary-4b/model.safetensors.index.json', 'packaging/model-overrides/summary-4b/preprocessor_config.json', 'packaging/model-overrides/summary-4b/processor_config.json', 'packaging/model-overrides/summary-4b/tokenizer.json', 'packaging/model-overrides/summary-4b/tokenizer_config.json', 'packaging/model-overrides/summary-4b/video_preprocessor_config.json', 'packaging/model-overrides/summary-4b/vocab.json', 'packaging/model-overrides/summary-9b/chat_template.jinja', 'packaging/model-overrides/summary-9b/config.json', 'packaging/model-overrides/summary-9b/model-00001-of-00002.safetensors.header', 'packaging/model-overrides/summary-9b/model-00002-of-00002.safetensors.header', 'packaging/model-overrides/summary-9b/model.safetensors.index.json', 'packaging/model-overrides/summary-9b/preprocessor_config.json', 'packaging/model-overrides/summary-9b/processor_config.json', 'packaging/model-overrides/summary-9b/tokenizer.json', 'packaging/model-overrides/summary-9b/tokenizer_config.json', 'packaging/model-overrides/summary-9b/video_preprocessor_config.json', 'packaging/model-overrides/summary-9b/vocab.json', 'packaging/models.installed.lock.json', 'packaging/models.lock.json', 'packaging/runtime-wheels.lock.json', 'packaging/runtime.entitlements', 'packaging/test_bootstrap.py', 'packaging/verification.json', 'requirements.lock', 'runtime/requirements.lock', 'scripts/check.sh', 'scripts/evaluate_summaries.py', 'scripts/generate_icon.swift', 'scripts/install_release.py', 'scripts/package_macos.py', 'scripts/project_backup.py', 'src/AppPaths.swift', 'src/AudioMixer.swift', 'src/AudioSpool.swift', 'src/AudioTap.swift', 'src/CaptureController.swift', 'src/MeetingIcon.swift', 'src/MeetingOverlay.swift', 'src/MeetingRecording.swift', 'src/MicrophoneCapture.swift', 'src/RuntimeBootstrap.swift', 'src/SessionFiles.swift', 'src/SummaryFreshness.swift', 'src/SummaryRequestPolicy.swift', 'src/WorkerClient.swift', 'src/WorkerWatchdog.swift', 'src/recent_transcript.py', 'src/session_title.py', 'src/summary_writer.py', 'src/transcript_log.py', 'src/worker.py', 'tests/WorkerClientChecks.swift', 'tests/WorkerRecoveryChecks.swift', 'tests/fixtures/acceptance-v1/README.md', 'tests/fixtures/acceptance-v1/development.json', 'tests/fixtures/acceptance-v1/holdout.json', 'tests/fixtures/acceptance-v1/manifest.json', 'tests/fixtures/recovery_worker.py', 'tests/fixtures/summary-quality.json', 'tests/fixtures/worker_client_fixture.py', 'tests/integration_split.py', 'tests/meeting-sample.wav', 'tests/test_acceptance_corpus.py', 'tests/test_asr_timestamps.py', 'tests/test_audio_mixer.swift', 'tests/test_audio_spool.swift', 'tests/test_capture_modes.swift', 'tests/test_install_release.py', 'tests/test_meeting_recording.swift', 'tests/test_microphone_pcm.swift', 'tests/test_pipeline_evaluation.py', 'tests/test_project_backup.py', 'tests/test_recent_transcript.py', 'tests/test_session_files.swift', 'tests/test_session_title.py', 'tests/test_short_evidence.py', 'tests/test_summary_freshness.swift', 'tests/test_summary_recovery.py', 'tests/test_summary_references.py', 'tests/test_summary_request_policy.swift', 'tests/test_summary_writer.py', 'tests/test_transcript_log.py', 'tests/test_worker_protocol.py', 'tests/test_worker_watchdog.swift']
+          
+          
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError('Duplicate manifest key')
+                  result[key] = value
+              return result
+          
+          
+          def valid_name(name):
+              parts = name.split('/')
+              if (not name or len(name.encode('utf-8')) > 1000 or name.startswith('/')
+                      or '\\' in name or any(part in ('', '.', '..') for part in parts)
+                      or any(ord(c) < 32 or ord(c) == 127 for c in name)
+                      or any(part.casefold() in ('.git', '.github') for part in parts)
+                      or unicodedata.normalize('NFC', name) != name):
+                  raise ValueError('Unsafe archive filename')
+              return name
+          
+          
+          def validate_extract(archive, expected, destination):
+              if not re.fullmatch('[0-9a-fA-F]{64}', expected or ''):
+                  raise ValueError('archive_sha256 must contain exactly 64 hexadecimal digits')
+              archive = Path(archive)
+              if not archive.is_file() or archive.is_symlink() or archive.stat().st_size > MAX_ARCHIVE:
+                  raise ValueError('Snapshot missing or exceeds 25 MiB')
+              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+              if digest != expected.lower():
+                  raise ValueError('Snapshot SHA-256 differs from the explicitly approved input')
+              destination = Path(destination)
+              destination.mkdir(parents=True, exist_ok=False)
+              with zipfile.ZipFile(archive) as package:
+                  entries = package.infolist()
+                  if len(entries) > MAX_FILES:
+                      raise ValueError('Too many archive entries')
+                  names, identities, expanded = {}, set(), 0
+                  for entry in entries:
+                      name = valid_name(entry.orig_filename)
+                      if entry.filename != entry.orig_filename or entry.is_dir():
+                          raise ValueError('Truncated filename or directory entry')
+                      if not entry.flag_bits & 0x800 and any(ord(c) > 127 for c in name):
+                          raise ValueError('Non-ASCII filenames must be explicitly UTF-8 encoded')
+                      identity = name.casefold()
+                      if identity in identities:
+                          raise ValueError('Duplicate or case-colliding archive filename')
+                      identities.add(identity)
+                      mode = entry.external_attr >> 16
+                      if stat.S_IFMT(mode) not in (0, stat.S_IFREG) or mode & 0o7000:
+                          raise ValueError('Links and special archive files are forbidden')
+                      if entry.flag_bits & 1 or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                          raise ValueError('Encrypted or unsupported archive entry')
+                      if entry.file_size > MAX_FILE or entry.file_size > max(1, entry.compress_size) * 200:
+                          raise ValueError('Archive entry exceeds size or expansion bound')
+                      expanded += entry.file_size
+                      if expanded > MAX_EXPANDED:
+                          raise ValueError('Archive expansion exceeds 128 MiB')
+                      names[name] = entry
+                  if METADATA not in names or names[METADATA].file_size > 256 * 1024:
+                      raise ValueError('Missing or oversized internal SHA manifest')
+                  metadata = json.loads(package.read(names[METADATA]).decode('utf-8'), object_pairs_hook=unique_object)
+                  if metadata.get('format') != 1 or not isinstance(metadata.get('files_sha256'), dict):
+                      raise ValueError('Unknown manifest format')
+                  hashes = metadata['files_sha256']
+                  if set(hashes) != set(names) - {METADATA} or set(hashes) != set(ALLOWED):
+                      raise ValueError('Snapshot must exactly match the approved file whitelist')
+                  total_read = 0
+                  for name in sorted(hashes):
+                      valid_name(name)
+                      if not isinstance(hashes[name], str) or not re.fullmatch('[0-9a-f]{64}', hashes[name]):
+                          raise ValueError('Invalid internal SHA-256')
+                      entry = names[name]
+                      target = destination / name
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      actual = hashlib.sha256()
+                      with package.open(entry) as source, target.open('xb') as output:
+                          size = 0
+                          while chunk := source.read(1024 * 1024):
+                              size += len(chunk)
+                              total_read += len(chunk)
+                              if size > entry.file_size or size > MAX_FILE or total_read > MAX_EXPANDED:
+                                  raise ValueError('Actual expansion exceeds archive declarations')
+                              output.write(chunk)
+                              actual.update(chunk)
+                      if size != entry.file_size or actual.hexdigest() != hashes[name]:
+                          raise ValueError('Internal source SHA-256 mismatch')
+                      os.chmod(target, 0o755 if entry.external_attr >> 16 & 0o111 else 0o644)
+              return hashes
+          
+          
+          def main():
+              import shutil
+              import subprocess
+              repo = Path.cwd().resolve()
+              if not os.environ.get('GITHUB_REF', '').startswith('refs/heads/'):
+                  raise ValueError('Apply only on an explicitly selected branch')
+              expected = os.environ.get('ARCHIVE_SHA256', '')
+              work = Path(tempfile.mkdtemp(prefix='meeting-source-', dir=os.environ['RUNNER_TEMP']))
+              try:
+                  files = validate_extract(repo / 'source-snapshot.zip', expected, work/'files')
+                  # Never follow existing checkout symlinks while copying validated source.
+                  for name in sorted(files):
+                      target = repo / name
+                      current = target
+                      while current != repo:
+                          if current.is_symlink():
+                              raise ValueError('Existing checkout contains a symlink at a source path')
+                          current = current.parent
+                      if target.exists() and not target.is_file():
+                          raise ValueError('Existing source destination is not a regular file')
+                  for name in sorted(files):
+                      target = repo / name
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      temporary = target.with_name(target.name + '.snapshot-new')
+                      if temporary.exists() or temporary.is_symlink():
+                          raise ValueError('Unexpected temporary destination exists')
+                      shutil.copy2(work/'files'/name, temporary)
+                      os.replace(temporary, target)
+                  subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True)
+                  subprocess.run(['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], check=True)
+                  subprocess.run(['git', 'add', '--', *sorted(files)], check=True)
+                  # Current working tree only. Previous commits and source history remain.
+                  subprocess.run(['git', 'rm', '-r', '--ignore-unmatch', '--', 'source-snapshot.zip', 'dist'], check=True)
+                  if subprocess.run(['git', 'diff', '--cached', '--quiet']).returncode == 0:
+                      print('Approved snapshot already applied')
+                      return
+                  subprocess.run(['git', 'commit', '-m', 'Update 0.7.0 beta source snapshot'], check=True)
+                  subprocess.run(['git', 'push', 'origin', 'HEAD:'+os.environ['GITHUB_REF']], check=True)
+                  print(f'Applied {len(files)} approved source files; archive SHA-256 {expected.lower()}')
+                  summary = os.environ.get('GITHUB_STEP_SUMMARY')
+                  if summary:
+                      with open(summary, 'a', encoding='utf-8') as output:
+                          output.write(f'Applied {len(files)} approved source files. Archive SHA-256: `{expected.lower()}`.\n')
+              finally:
+                  shutil.rmtree(work)
+          
+          if __name__ == '__main__':
+              main()
+          PY
