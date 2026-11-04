@@ -72,13 +72,14 @@ Use the explicit reviewed worker source. The packager's default installed-worker
 path is intentionally not suitable for a clean checkout.
 
 The manual-only `.github/workflows/macos-package.yml` uses the same factory and
-explicit paths on `macos-15`, rejects Intel and systems older than14.4, and checks
+explicit paths on `macos-26`, rejects Intel and systems older than14.4, and checks
 the saved archive, five worker hashes, signatures, native dependencies and imports.
 Its artifact contains the ZIP, `SHA256SUMS` and sanitized software receipts.
 It does not download models, run inference, capture or play audio. Receipts mark
 `model_validation=not_run` and `semantic_acceptance=not_evaluated`. The workflow
-does not upload a release or install an app. Its ad-hoc signature is not Developer
-ID signing or notarization; hosted build execution remains a separate gate.
+does not upload a release or install an app. The selected ad-hoc distribution
+mode does not require Developer ID or notarization for project acceptance.
+Hosted build execution remains a separate software verification gate.
 
 ## Fixed upstream interpreter and notices
 

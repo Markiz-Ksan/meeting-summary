@@ -5,3 +5,5 @@ The current owner-authorized scope is build and software checks only. Do not sta
 Preserve user recordings, transcripts, notes and installed model settings. Keep model weights, credentials and personal data out of source archives. Preserve a verified recoverable app/runtime backup before replacing an installed version. Do not silently deploy experimental workers.
 
 Mark candidate receipts `model_validation=not_run` and `semantic_acceptance=not_evaluated`. Keep build previews distinct from accepted releases. Do not claim 100% readiness, runtime correctness or universal hardware support from unit tests, imports or packaging alone. Public publication requires a separate explicit instruction.
+
+The owner explicitly waived Developer ID and Apple notarization on 4 November 2026. Distribute ad-hoc-signed Mac builds with SHA-256 checksums; do not request a paid membership, certificate or notarization approval, and do not count their absence as a project blocker. Preserve package-integrity verification. This waiver does not authorize model/audio tests, public publication or changes to macOS security settings.

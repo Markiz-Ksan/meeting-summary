@@ -49,14 +49,12 @@ runtime/models directory. This uses models.installed.lock.json. The light4B prof
 still requires its public download unless its weights are supplied separately.
 A full offline ZIP exceeds GitHub's2GB per-release-asset limit.
 
-Ad-hoc signing is the default candidate mode. Normal Gatekeeper distribution
-requires a Developer ID Application certificate and notarization. Apple Development
-is a different identity and does not establish that distribution trust. The
-available read-only identity check found only Apple Development. Once an existing
-Developer ID identity and notarytool profile are provided, the same script accepts
---sign <identity> --notary-profile <profile>. It signs nested Mach-O binaries,
-enables the hardened runtime, submits for notarization, staples and validates the
-bundle, and recreates the ZIP. No private keys or passwords are written into it.
+Ad-hoc signing is the selected distribution mode, with SHA-256 checksums and
+package-integrity verification. The owner explicitly excludes paid Developer ID
+certificates and Apple notarization from project acceptance. macOS may require
+manual approval when a downloaded build is first opened. Do not request a paid
+membership or signing handoff, and do not change system security settings.
+Existing optional signing flags are not used for this release.
 
 Worker integration uses AppPaths.root/python/workerScript/workerEnvironment and
 RuntimeBootstrap.prepare(progress:completion:). Capture must remain disabled until
