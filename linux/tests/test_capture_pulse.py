@@ -26,7 +26,7 @@ class PulseIntegration(unittest.TestCase):
         cls.np = np
         cls.root = tempfile.TemporaryDirectory(prefix='meeting-pulse-')
         cls.modules = []
-        cls.report = dict(format=2, synthetic=True, cases={},
+        cls.report = dict(format=3, synthetic=True, cases={},
                           ffmpeg_version=subprocess.check_output(['ffmpeg', '-version'], text=True),
                           pulse_version=subprocess.check_output(['pulseaudio', '--version'], text=True))
         cls.write_report()
@@ -54,21 +54,20 @@ class PulseIntegration(unittest.TestCase):
         cls.root.cleanup()
         cls.write_report()
 
-    def capture_case(self, mode, *, legacy_fragment=False):
+    def capture_case(self, mode, *, legacy_probe=False):
         from meeting_summary.capture import PulseCapture, capture_command
         blocks, errors, players = [], [], []
         capture = PulseCapture(mode, blocks.append, errors.append, log_level='verbose')
         def legacy_command(*args, **kwargs):
-            # Reproduce the previous production command by changing ONE variable:
-            # remove only the per-input fragment request. Real FFmpeg/Pulse still run.
+            # Same graph and buffering; change ONE variable to isolate startup:
+            # restore stream-info probing on each real Pulse input.
             command = capture_command(*args, **kwargs)
-            for _ in range(command.count('-fragment_size')):
-                index = command.index('-fragment_size')
-                del command[index:index+2]
+            while '-nofind_stream_info' in command:
+                command.remove('-nofind_stream_info')
             return command
         began = time.monotonic()
         try:
-            if legacy_fragment:
+            if legacy_probe:
                 with patch('meeting_summary.capture.capture_command', side_effect=legacy_command):
                     capture.start()
             else:
@@ -97,13 +96,13 @@ class PulseIntegration(unittest.TestCase):
         result = capture.diagnostic_snapshot()
         result.update(frames=len(audio), errors=[repr(error) for error in errors],
                       total_seconds=round(time.monotonic()-began, 6),
-                      legacy_default_fragment=legacy_fragment)
+                      legacy_stream_probe=legacy_probe)
         if len(audio):
             fft = abs(self.np.fft.rfft(audio))
             bins = self.np.fft.rfftfreq(len(audio), 1/48000)
             magnitude = lambda frequency: float(fft[abs(bins-frequency)<2].max())
             result.update(system_tone=magnitude(440), microphone_tone=magnitude(880))
-        key = 'legacy-both' if legacy_fragment else mode
+        key = 'legacy-both' if legacy_probe else mode
         self.report['cases'][key] = result
         self.write_report()  # Save failures BEFORE assertions or later steps can abort.
         print(json.dumps(dict(case=key, **result)), flush=True)
@@ -122,8 +121,8 @@ class PulseIntegration(unittest.TestCase):
                 if mode == 'both': self.assertGreater(min(system, mic), max(system, mic)*.25, result)
         # Diagnostic control is not a success gate: the three production modes
         # above must still pass all original assertions. Its trace establishes
-        # whether the old server-selected-fragment stall reproduces on this same runner.
-        self.capture_case('both', legacy_fragment=True)
+        # whether the old serial stream-info startup delay reproduces on this same runner.
+        self.capture_case('both', legacy_probe=True)
 
 if __name__ == '__main__':
     unittest.main()

@@ -412,3 +412,33 @@ class CaptureDiagnosticTests(unittest.TestCase):
         self.assertIn('synthetic diagnostic',data['stderr_tail'])
         self.assertEqual(data['returncode'],0)
         self.assertFalse(data['forced_kill'])
+
+class DeclaredPulseInputTests(unittest.TestCase):
+    def test_known_pcm_inputs_skip_serial_analysis_and_rebase_original_pts(self):
+        from meeting_summary.capture import capture_command
+        for mode in ['system','microphone','both']:
+            command=capture_command(mode,'speaker.monitor','microphone')
+            count=2 if mode=='both' else 1
+            self.assertEqual(command.count('-nofind_stream_info'),count)
+            graph=command[command.index('-filter_complex')+1] if mode=='both' else command[command.index('-af')+1]
+            self.assertEqual(graph.count('asetpts=PTS-STARTPTS'),count)
+            self.assertNotIn('N/SR/TB',graph,'sample-count reset would erase real gaps')
+
+    def test_nonzero_live_epoch_does_not_become_leading_silence(self):
+        import array,math,shutil,subprocess
+        from meeting_summary.capture import capture_command
+        ffmpeg=shutil.which('ffmpeg')
+        if not ffmpeg:self.skipTest('FFmpeg synthetic-filter check requires executable')
+        command=capture_command('both','speaker.monitor','microphone')
+        graph=command[command.index('-filter_complex')+1]
+        # Preserve the synthetic live epoch; no implicit input-start subtraction.
+        result=subprocess.run([ffmpeg,'-v','error','-copyts','-f','lavfi','-i',
+            'sine=frequency=440:sample_rate=48000:duration=0.5,asetpts=PTS+5/TB',
+            '-f','lavfi','-i','sine=frequency=880:sample_rate=48000:duration=0.5,asetpts=PTS+5/TB',
+            '-filter_complex',graph,'-map','[a]','-t','0.25','-ac','1','-ar','48000',
+            '-f','s16le','-c:a','pcm_s16le','pipe:1'],capture_output=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr.decode())
+        audio=array.array('h');audio.frombytes(result.stdout)
+        self.assertGreaterEqual(len(audio),10000)
+        self.assertGreater(math.sqrt(sum(float(x*x) for x in audio)/len(audio)),500,
+                           'wall-clock epoch was padded as silence instead of rebased')

@@ -23,15 +23,16 @@ def capture_command(mode, system_source, microphone_source, executable='ffmpeg',
     sources = ([system_source] if mode == 'system' else [microphone_source] if mode == 'microphone'
                else [system_source, microphone_source])
     for source in sources:
-        # FFmpeg's Pulse demuxer fills a complete server-selected fragment before
-        # returning its first packet, and inputs are opened/probed serially.
-        # Request a bounded 50ms quantum: 48000Hz * 2 channels * 2 bytes * .05.
-        # Keep every initial packet and the original wall-clock PTS.
-        command += ['-thread_queue_size', '1024', '-fragment_size', '9600', '-f', 'pulse', '-i', source]
+        # Pulse declares PCM codec/rate/channels in its header. Stream-info
+        # decoding would serially consume live packets before reader threads run.
+        # Skip that analysis, retain all packets, then rebase their original PTS
+        # below so the wall-clock epoch never becomes years of leading silence.
+        command += ['-thread_queue_size', '1024', '-fragment_size', '9600',
+                    '-nofind_stream_info', '-f', 'pulse', '-i', source]
     if mode == 'both':
-        command += ['-filter_complex', '[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=0:normalize=1,aresample=48000:async=1:first_pts=0[a]', '-map', '[a]']
+        command += ['-filter_complex', '[0:a]asetpts=PTS-STARTPTS[s];[1:a]asetpts=PTS-STARTPTS[m];[s][m]amix=inputs=2:duration=longest:dropout_transition=0:normalize=1,aresample=48000:async=1:first_pts=0[a]', '-map', '[a]']
     else:
-        command += ['-af', 'aresample=48000:async=1:first_pts=0']
+        command += ['-af', 'asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0']
     return command + ['-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1']
 
 
