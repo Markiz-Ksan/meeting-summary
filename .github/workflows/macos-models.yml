@@ -1,0 +1,66 @@
+name: Manual Apple Silicon public-model clean-room validation
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Verified arm64 label; macos-15 is standard M1/7GB. 9B needs a configured >=16GiB Metal runner.'
+        type: string
+        required: true
+        default: macos-15
+      profile:
+        description: 'Public pinned weights. Standard9B intentionally fails below16GiB.'
+        type: choice
+        options: [light, standard, both]
+        default: light
+permissions:
+  contents: read
+concurrency:
+  group: macos-models-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  models:
+    name: ${{ matrix.profile }} on ${{ inputs.runner }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile: ${{ fromJSON(inputs.profile == 'both' && '["light","standard"]' || format('["{0}"]', inputs.profile)) }}
+    env:
+      MEETING_CI_RUNNER: ${{ inputs.runner }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      TOKENIZERS_PARALLELISM: 'false'
+      OMP_NUM_THREADS: '4'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fail before dependency installation on Intel or emulation
+        run: |
+          uname -a
+          sw_vers
+          sysctl -n hw.memsize
+          df -h "$RUNNER_TEMP"
+          test "$(uname -m)" = arm64
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.13'
+      - name: Check CI protocol harness without models or audio
+        run: python -B packaging/ci_models.py self-test
+      - name: Fresh isolated runtime with pinned macOS14 MLX wheels and locked dependencies
+        run: python -B packaging/ci_models.py install --runtime "$RUNNER_TEMP/meeting-ci-runtime"
+      - name: Download public assets, real synthetic ASR-summary-title, unchanged offline second start
+        run: |
+          "$RUNNER_TEMP/meeting-ci-runtime/bin/python" -B packaging/ci_models.py validate \
+            --profile "${{ matrix.profile }}" \
+            --report "reports/macos-${{ matrix.profile }}.json"
+      - name: Retain JSON evidence only; never upload models, WAV, TXT, caches or screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-public-models-${{ matrix.profile }}-${{ github.run_number }}
+          path: reports/*.json
+          if-no-files-found: warn
+          retention-days: 14
