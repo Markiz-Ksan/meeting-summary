@@ -3,7 +3,7 @@ import QuartzCore
 import AVFoundation
 import CoreAudio
 
-let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/MeetingOverlay")
+let root = AppPaths.root
 final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -129,13 +129,27 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     var pending = [AudioChunk]()
     var spool: AudioSpool?
     var transcriptFile: URL?
+    var recordingFile: URL?
+    var recordingStartedAt: Double?
     var summaryInFlight: (id: Int, timestamp: Double)?
     var latestContext: (text: String, timestamp: Double, id: Int)?
     var lastSubmittedContext = ""
     var asrSentAt = Date.distantPast
     var summarySentAt = Date.distantPast
     var lastSummaryRequest = Date.distantPast
-    var failures = ["transcribe": 0, "summarize": 0]
+    var watchdogs = ["transcribe": WorkerWatchdog(), "summarize": WorkerWatchdog()]
+    var runtimeReady = !AppPaths.isPortableBundle
+    var preparingRuntime = false
+    var prepareToken = UUID()
+    var titleStartedAt: TimeInterval = 0
+    var sessionPair: SessionFiles.Pair?
+    var finalizingTitle = false
+    var titleRequested = false
+    var titleText = ""
+    var summaryReplay = false
+    var summaryAttemptText = ""
+    var summaryAttempts = 0
+    var summaryRetryNotBefore: TimeInterval = 0
     let diagnostics = Diagnostics(directory: root.appendingPathComponent("runtime"))
     var tap: CaptureController?
     var captureMode = CaptureMode(rawValue: UserDefaults.standard.string(forKey: "captureMode") ?? "system") ?? .system
@@ -149,7 +163,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     var captureDrained = false
     var reconnecting = false
     var captureFailures = 0
-    var drainStarted = Date.distantPast
+    var drainStarted: TimeInterval = 0
     var quitAfterDrain = false
     var shutdownUntil = Date.distantPast
     var preservePending = false
@@ -220,7 +234,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         let deviceItem = NSMenuItem(title: "Выбрать микрофон", action: nil, keyEquivalent: ""); deviceItem.submenu = microphoneMenu; menu.addItem(deviceItem)
         microphoneToggle.target = self; microphoneToggle.action = #selector(toggleMicrophone); menu.addItem(microphoneToggle)
         menu.addItem(.separator())
-        for (name, action) in [("Текст крупнее", #selector(largerText)), ("Текст мельче", #selector(smallerText)), ("Вернуть окно на экран", #selector(resetPosition)), ("Открыть расшифровки", #selector(openTranscripts)), ("Дописать сохранённые фрагменты", #selector(recoverPending)), ("Открыть журнал работы", #selector(openDiagnostics)), ("Проверить отображение", #selector(previewOverlay)), ("Проверить на примере со звуком", #selector(testDemo)), ("Проверить только звук", #selector(checkAudio))] {
+        for (name, action) in [("Текст крупнее", #selector(largerText)), ("Текст мельче", #selector(smallerText)), ("Вернуть окно на экран", #selector(resetPosition)), ("Открыть записи встреч", #selector(openTranscripts)), ("Дописать сохранённые фрагменты", #selector(recoverPending)), ("Открыть журнал работы", #selector(openDiagnostics)), ("Проверить отображение", #selector(previewOverlay)), ("Проверить на примере со звуком", #selector(testDemo)), ("Проверить только звук", #selector(checkAudio))] {
             let item = NSMenuItem(title: name, action: action, keyEquivalent: action == #selector(previewOverlay) ? "p" : ""); item.target = self; menu.addItem(item)
         }
         menu.addItem(.separator())
@@ -319,13 +333,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     @objc func hidePanel() { overlayHidden = true; visibilityItem.title = "Показать сводку"; panel.orderOut(nil) }
     @objc func toggleVisibility() { if overlayHidden { showPanel() } else { hidePanel() } }
     var transcriptsFolder: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Расшифровки встреч", isDirectory: true)
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Сводка встреч", isDirectory: true)
     }
     @objc func openTranscripts() {
         do {
             try FileManager.default.createDirectory(at: transcriptsFolder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             NSWorkspace.shared.open(transcriptsFolder)
-        } catch { statusText = "Не удалось открыть расшифровки: \(error.localizedDescription)" }
+        } catch { statusText = "Не удалось открыть записи: \(error.localizedDescription)" }
     }
     @objc func largerText() { summary.changeFont(by: 2) }
     @objc func smallerText() { summary.changeFont(by: -2) }
@@ -363,6 +377,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     func windowShouldClose(_ sender: NSWindow) -> Bool { hidePanel(); return false }
     @objc func quit() { NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        cancelPreparation()
         if running { quitAfterDrain = true; stop(); return .terminateLater }
         if Date() < shutdownUntil {
             quitAfterDrain = true
@@ -371,8 +386,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         }
         return .terminateNow
     }
-    func applicationWillTerminate(_ notification: Notification) { asr?.stop(); summarizer?.stop(); tap?.stop() }
-    @objc func toggle() { if running || preview { stop() } else { begin() } }
+    func applicationWillTerminate(_ notification: Notification) { RuntimeBootstrap.cancel(); asr?.stop(); summarizer?.stop(); tap?.stop() }
+    @objc func toggle() { if running || preview || preparingRuntime { stop() } else { begin() } }
     @objc func testDemo() { guard !running else { return }; demo = true; begin(); showPanel() }
     @objc func checkAudio() {
         guard !quitAfterDrain else { return }
@@ -418,27 +433,60 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
             player = try AVAudioPlayer(contentsOf: audioURL); if let uid = tap?.outputUID, !uid.isEmpty { player?.currentDevice = uid }; player?.numberOfLoops = qaRepeat ? -1 : 0; player?.prepareToPlay(); player?.play(); demo = false }
         catch { statusText = "Нет тестового аудио: \(error.localizedDescription)" }
     }
+    func prepareRuntime(_ action: @escaping () -> Void) {
+        guard !preparingRuntime, !quitAfterDrain else { return }
+        preparingRuntime = true; prepareToken = UUID(); let token = prepareToken
+        startButton.title = "Отменить подготовку"; startButton.isEnabled = true
+        RuntimeBootstrap.prepare(progress: { [weak self] text in
+            guard let self, self.preparingRuntime, self.prepareToken == token else { return }
+            self.statusText = text
+        }) { [weak self] result in
+            guard let self, self.preparingRuntime, self.prepareToken == token, !self.quitAfterDrain else { return }
+            self.preparingRuntime = false; self.startButton.title = "Начать"
+            switch result {
+            case .success: self.runtimeReady = true; action()
+            case .failure(let error): self.statusText = "Подготовка не завершена: \(error.localizedDescription)"
+            }
+        }
+    }
+    func cancelPreparation() {
+        if preparingRuntime { preparingRuntime = false; prepareToken = UUID(); RuntimeBootstrap.cancel() }
+    }
+    func recoverRenameJournals() throws {
+        guard FileManager.default.fileExists(atPath: pendingRoot.path) else { return }
+        for directory in try FileManager.default.contentsOfDirectory(at: pendingRoot, includingPropertiesForKeys: [.isDirectoryKey]) {
+            if (try directory.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true { try SessionFiles.recover(in: directory) }
+        }
+    }
     func begin() {
         guard !running, !quitAfterDrain else { return }
+        guard runtimeReady else { prepareRuntime { [weak self] in self?.begin() }; return }
+        do { try recoverRenameJournals() }
+        catch { statusText = "Не удалось восстановить имена сохранённой записи: \(error.localizedDescription)"; return }
         freshness.reset(); refreshFreshness()
         preview = false; showPanel(); generation = UUID()
         running = true; ready = false; draining = false; captureDrained = false; preservePending = false
         captureFailures = 0; hasSummary = false; pending.removeAll(); inFlight = nil; latestContext = nil
         summaryInFlight = nil; lastSubmittedContext = ""; lastSummaryRequest = .distantPast
-        failures = ["transcribe": 0, "summarize": 0]; lastSpeechTimestamp = 0
+        watchdogs["transcribe"]?.reset(); watchdogs["summarize"]?.reset()
+        finalizingTitle = false; titleRequested = false; titleText = ""; sessionPair = nil; summaryReplay = false; summaryAttempts = 0; summaryAttemptText = ""; summaryRetryNotBefore = 0; lastSpeechTimestamp = 0
         startButton.title = "Остановить"; startButton.isEnabled = true
         presentSummary(""); statusText = "Подключение источника и загрузка моделей…"
-        let directory = pendingRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let sessionID = UUID()
+        let directory = pendingRoot.appendingPathComponent(sessionID.uuidString, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            try FileManager.default.createDirectory(at: transcriptsFolder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd HH-mm-ss"
-            let prefix = demo ? "Тест — " : "Встреча — "
-            let file = transcriptsFolder.appendingPathComponent(prefix + formatter.string(from: Date()) + " — " + UUID().uuidString.prefix(8) + ".txt")
+            let started = Date().timeIntervalSince1970
+            let pair = try SessionFiles.allocate(documentsRoot: FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0], startedAt: Date(timeIntervalSince1970: started), id: sessionID, title: demo ? "Тест" : "Встреча")
+            sessionPair = pair
+            let file = pair.transcript, audio = pair.audio
             transcriptFile = file; session = directory
-            let manifest: [String: Any] = ["transcript": file.path, "started": Date().timeIntervalSince1970, "source": captureMode.rawValue]
+            let recording = try MeetingRecording(path: audio, startedAt: started)
+            recordingFile = audio; recordingStartedAt = started
+            let manifest: [String: Any] = ["transcript": file.path, "started": started, "source": captureMode.rawValue,
+                                           "audio": audio.path, "audio_started": started, "session_id": pair.id.uuidString]
             try JSONSerialization.data(withJSONObject: manifest).write(to: directory.appendingPathComponent("session.json"), options: .atomic)
-            let spool = AudioSpool(directory: directory); self.spool = spool
+            let spool = AudioSpool(directory: directory, recording: recording); self.spool = spool
             let token = generation
             spool.onChunk = { [weak self] chunk in
                 guard let self, self.generation == token else { return }
@@ -461,9 +509,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     func diagnostic(_ fields: [String: Any]) { diagnostics.record(fields) }
     func startWorker(_ mode: String) {
         guard running, let session else { return }
-        if mode == "summarize" && draining { return }
+        if mode == "summarize" && draining && !finalizingTitle { return }
         let client = WorkerClient(mode: mode, session: session, transcript: mode == "transcribe" ? transcriptFile : nil,
-                                  resume: mode == "transcribe" && FileManager.default.fileExists(atPath: transcriptFile?.path ?? ""))
+                                  resume: mode == "transcribe" && FileManager.default.fileExists(atPath: transcriptFile?.path ?? ""),
+                                  audioFile: recordingFile, audioStartedAt: recordingStartedAt)
         if mode == "transcribe" { asr = client; asrReady = false } else { summarizer = client; summaryReady = false }
         let token = generation
         client.onEvent = { [weak self, weak client] object in
@@ -476,25 +525,32 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
                   (mode == "transcribe" ? self.asr === client : self.summarizer === client) else { return }
             self.workerFailed(mode, reason: "Процесс завершился: \(code)")
         }
+        watchdogs[mode]?.launched(at: MonotonicTime.now)
         do { try client.start(); diagnostic(["event": "worker_start", "stage": mode]) }
         catch { workerFailed(mode, reason: error.localizedDescription) }
     }
+    func terminalWorker(_ mode: String, reason: String) {
+        watchdogs[mode]?.stop()
+        if mode == "transcribe" {
+            asr?.stop(); asr = nil; asrReady = false; inFlight = nil
+            failSession("Распознавание остановлено. Фрагменты сохранены; используйте «Дописать сохранённые фрагменты».")
+        } else {
+            summarizer?.stop(); summarizer = nil; summaryReady = false; summaryInFlight = nil
+            if finalizingTitle { finishStop() }
+            else { statusText = "Сводка недоступна · расшифровка продолжает сохраняться" }
+        }
+        diagnostic(["event": "worker_exhausted", "stage": mode, "reason": reason])
+    }
     func workerFailed(_ mode: String, reason: String) {
         guard running else { return }
+        let action = watchdogs[mode]?.failed(at: MonotonicTime.now)
         diagnostic(["event": "worker_failure", "stage": mode, "reason": reason])
-        failures[mode, default: 0] += 1; lastError = Date()
+        lastError = Date()
         if mode == "transcribe" { asr?.stop(); asr = nil; asrReady = false; inFlight = nil }
-        else { summarizer?.stop(); summarizer = nil; summaryReady = false; summaryInFlight = nil; lastSubmittedContext = "" }
-        if failures[mode, default: 0] > 3 {
-            if mode == "transcribe" { failSession("Распознавание остановлено. Фрагменты сохранены; используйте «Дописать сохранённые фрагменты».") }
-            else { statusText = "Сводка временно недоступна · расшифровка продолжает сохраняться" }
-            return
-        }
+        else { summarizer?.stop(); summarizer = nil; summaryReady = false; summaryInFlight = nil; lastSubmittedContext = ""; summaryReplay = true }
+        if finalizingTitle && mode == "summarize" { finishStop(); return }
+        if case .exhausted(let reason) = action { terminalWorker(mode, reason: reason.rawValue); return }
         statusText = mode == "transcribe" ? "Восстанавливаю распознавание · звук сохраняется" : "Восстанавливаю сводку · расшифровка продолжается"
-        let token = generation
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
-            guard let self, self.running, self.generation == token else { return }; self.startWorker(mode)
-        }
     }
     func receive(_ object: [String: Any], mode: String) {
         let event = object["event"] as? String ?? "unknown"
@@ -503,17 +559,29 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
                     "hasSummary": !(object["summary"] as? String ?? "").isEmpty,
                     "validationFailed": object["validation_failed"] as? Bool ?? false])
         if event == "ready" {
+            guard watchdogs[mode]?.ready(at: MonotonicTime.now) == true else { return }
             if mode == "transcribe" { asrReady = true; dispatchAudio() }
-            else { summaryReady = true; dispatchSummary() }
+            else { summaryReady = true; if finalizingTitle { dispatchTitle() } else { dispatchSummary() } }
             if !draining {
                 statusText = tap?.isCapturing == true ? "\(tap!.statusDescription) · сводка последних 5 минут" : "Модель готова · \(tap?.statusDescription ?? "ожидаю подключения звука")"
             }
+        } else if event == "progress" {
+            if let id = object["request_id"] as? Int { _ = watchdogs[mode]?.progress(id: id, at: MonotonicTime.now) }
         } else if event == "result" {
             let id = object["request_id"] as? Int
             if mode == "transcribe" {
                 guard let chunk = inFlight, id == chunk.id else { diagnostic(["event": "stale_result", "stage": mode]); return }
-                failures[mode] = 0
-                chunk.acknowledge(); pending.removeAll { $0.id == chunk.id }; inFlight = nil
+                guard watchdogs[mode]?.complete(id: chunk.id, at: MonotonicTime.now) == true else { return }
+                do { try chunk.acknowledge() }
+                catch {
+                    diagnostic(["event": "ack_cleanup_failure", "id": chunk.id, "reason": error.localizedDescription])
+                    // TXT has only the latest committed checkpoint. Advancing
+                    // while an older WAV remains would make its later replay
+                    // indistinguishable from uncommitted audio.
+                    failSession("Расшифровка сохранена · не удалось очистить фрагмент. Очередь оставлена для восстановления.")
+                    return
+                }
+                pending.removeAll { $0.id == chunk.id }; inFlight = nil
                 if let text = object["summary_context"] as? String, !text.isEmpty {
                     let timestamp = object["context_timestamp"] as? Double ?? chunk.timestamp
                     latestContext = (text, timestamp, chunk.id)
@@ -525,7 +593,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
                 dispatchAudio(); dispatchSummary()
             } else {
                 guard let request = summaryInFlight, id == request.id else { return }
-                failures[mode] = 0; summaryInFlight = nil
+                guard watchdogs[mode]?.complete(id: request.id, at: MonotonicTime.now) == true else { return }
+                summaryInFlight = nil
+                if finalizingTitle && titleRequested {
+                    finalizePair(topic: object["title"] as? String)
+                    finishStop(); return
+                }
+                if finalizingTitle { dispatchTitle(); return }
                 if let text = object["summary"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                    Date().timeIntervalSince1970 - request.timestamp < 300, !draining {
                     let shownAt = Date()
@@ -535,6 +609,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
                     statusText = "Захват включён · сводка обновлена \(DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium))"
                 } else if !draining && object["validation_failed"] as? Bool == true {
                     freshness.reject(); refreshFreshness()
+                    if summaryAttempts < 2 {
+                        lastSubmittedContext = ""
+                        summaryRetryNotBefore = MonotonicTime.now + 20
+                    }
                     statusText = "Новая сводка не прошла проверку · расшифровка сохраняется"
                 } else if !hasSummary && !draining { statusText = "Речь сохраняется · ожидаю содержательные реплики для сводки" }
                 dispatchSummary()
@@ -545,18 +623,24 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     }
     func dispatchAudio() {
         guard running else { return }
-        if draining && captureDrained && pending.isEmpty && inFlight == nil { finishStop(); return }
+        if draining && captureDrained && pending.isEmpty && inFlight == nil { finalizeSession(); return }
         guard asrReady, inFlight == nil, let chunk = pending.first, let asr else { return }
+        guard watchdogs["transcribe"]?.beginRequest(id: chunk.id, at: MonotonicTime.now) == true else { return }
         do { inFlight = chunk; asrSentAt = Date(); try asr.send(chunk.request) }
         catch { workerFailed("transcribe", reason: error.localizedDescription) }
     }
     func dispatchSummary() {
         guard running, !draining, summaryReady, summaryInFlight == nil, let context = latestContext,
               let summarizer else { return }
-        guard SummaryRequestPolicy.allows(text: context.text, sourceTimestamp: context.timestamp,
+        guard context.text != summaryAttemptText || MonotonicTime.now >= summaryRetryNotBefore else { return }
+        guard summaryReplay || SummaryRequestPolicy.allows(text: context.text, sourceTimestamp: context.timestamp,
                                           now: Date().timeIntervalSince1970,
                                           lastRequested: lastSummaryRequest.timeIntervalSince1970,
                                           lastSubmittedText: lastSubmittedContext) else { return }
+        guard watchdogs["summarize"]?.beginRequest(id: context.id, at: MonotonicTime.now) == true else { return }
+        summaryReplay = false
+        if context.text != summaryAttemptText { summaryAttemptText = context.text; summaryAttempts = 0 }
+        summaryAttempts += 1
         do {
             summaryInFlight = (context.id, context.timestamp); summarySentAt = Date(); lastSummaryRequest = Date()
             lastSubmittedContext = context.text
@@ -599,16 +683,24 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     func tick() {
         refreshFreshness()
         guard running else { return }
-        if draining && Date().timeIntervalSince(drainStarted) > 120 {
+        if finalizingTitle && MonotonicTime.now - titleStartedAt >= 20 { finishStop(); return }
+        if draining && !preservePending && MonotonicTime.now - drainStarted > 120 {
             preserveAndFinish("Сохранение задержалось · оставшиеся фрагменты сохранены для восстановления"); return
         }
         if !draining { tap?.tick() }
         guard !checkingAudio else { return }
         if let end = qaEnd, Date() >= end, !qaStopPending { qaStopPending = true; stop() }
-        if !asrReady, let asr, Date().timeIntervalSince(asr.startedAt) > 180 { workerFailed("transcribe", reason: "Тайм-аут загрузки") }
-        if !summaryReady, let summarizer, Date().timeIntervalSince(summarizer.startedAt) > 180 { workerFailed("summarize", reason: "Тайм-аут загрузки") }
-        if inFlight != nil && Date().timeIntervalSince(asrSentAt) > 90 { workerFailed("transcribe", reason: "Тайм-аут распознавания") }
-        if summaryInFlight != nil && Date().timeIntervalSince(summarySentAt) > 180 { workerFailed("summarize", reason: "Тайм-аут сводки") }
+        for mode in ["transcribe", "summarize"] {
+            switch watchdogs[mode]?.poll(at: MonotonicTime.now) {
+            case .restart:
+                if mode == "summarize" && draining && !finalizingTitle { watchdogs[mode]?.stop() }
+                else { startWorker(mode) }
+            case .fail(let reason): workerFailed(mode, reason: reason.rawValue)
+            case .exhausted(let reason): terminalWorker(mode, reason: reason.rawValue)
+            default: break
+            }
+            if !running { return }
+        }
         if draining {
             dispatchAudio(); return
         }
@@ -621,16 +713,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         }
     }
     func stop() {
+        cancelPreparation()
         preview = false
         guard running else {
             presentSummary(""); statusItem?.button?.title = "Сводка"; startButton.title = "Начать"; return
         }
         guard !draining else { return }
-        draining = true; drainStarted = Date(); captureDrained = false; ready = false
+        draining = true; drainStarted = MonotonicTime.now; captureDrained = false; ready = false
         startButton.title = "Сохранение последних реплик…"; startButton.isEnabled = false
         statusText = "Останавливаю захват · сохраняю последние реплики"
         player?.stop(); player = nil; demo = false; qaRepeat = false
-        summarizer?.stop(); summarizer = nil; summaryReady = false; summaryInFlight = nil
         let token = generation
         let drained = { [weak self] in
             guard let self, self.generation == token else { return }
@@ -654,20 +746,61 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
     func preserveAndFinish(_ message: String) {
         preservePending = true
         diagnostic(["event": "forced_stop", "reason": message])
-        tap?.stop(); spool?.finish({})
-        finishStop(); statusText = message
+        // stop() already owns capture -> mixer -> spool completion ordering.
+        // Never invalidate sample callbacks or close WAV ahead of that boundary.
+        if captureDrained { finishStop() }
+        else if !draining { stop() }
+        statusText = message
+    }
+    func finalizeSession() {
+        guard !finalizingTitle else { return }
+        guard !preservePending, sessionPair != nil, let transcriptFile,
+              let content = try? String(contentsOf: transcriptFile, encoding: .utf8),
+              content.contains("[") else { finishStop(); return }
+        asr?.stop(); asr = nil; asrReady = false; watchdogs["transcribe"]?.stop()
+        let rows = content.split(separator: "\n").filter { $0.hasPrefix("[") }.joined(separator: "\n")
+        let characters = Array(rows)
+        if characters.count > 60000 {
+            let width = 5000
+            titleText = (0..<12).map { index -> String in
+                let start = index * (characters.count-width) / 11
+                return String(characters[start..<start+width])
+            }.joined(separator: "\n[…]\n")
+        } else { titleText = rows }
+        finalizingTitle = true; titleStartedAt = MonotonicTime.now
+        if summarizer == nil { watchdogs["summarize"]?.reset(); startWorker("summarize") }
+        statusText = "Расшифровка и звук сохранены · подбираю название"
+        dispatchTitle()
+    }
+    func dispatchTitle() {
+        guard running, finalizingTitle, !titleRequested, summaryReady, summaryInFlight == nil, let summarizer else { return }
+        guard watchdogs["summarize"]?.beginRequest(id: -1, at: MonotonicTime.now) == true else { return }
+        titleRequested = true; summaryInFlight = (-1, Date().timeIntervalSince1970)
+        do { try summarizer.send(["request_id": -1, "title_text": titleText]) }
+        catch { workerFailed("summarize", reason: error.localizedDescription) }
+    }
+    func finalizePair(topic: String?) {
+        guard let topic, let pair = sessionPair, let session else { return }
+        do {
+            let renamed = try SessionFiles.renameClosedPair(pair, topic: topic, sessionDirectory: session)
+            sessionPair = renamed; transcriptFile = renamed.transcript; recordingFile = renamed.audio
+        } catch {
+            preservePending = true
+            diagnostic(["event": "pair_rename_failure", "reason": error.localizedDescription])
+        }
     }
     func finishStop() {
         let remainingAudio = session.flatMap { try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil) }?.contains { $0.pathExtension == "wav" } ?? false
         let preserved = preservePending || !pending.isEmpty || remainingAudio
         diagnostic(["event": "session_stop", "pending": pending.count, "preserved": preserved])
+        watchdogs["transcribe"]?.stop(); watchdogs["summarize"]?.stop()
         running = false; ready = false; checkingAudio = false; draining = false; generation = UUID()
         asr?.stop(); asr = nil; summarizer?.stop(); summarizer = nil
         shutdownUntil = Date().addingTimeInterval(3.5)
         asrReady = false; summaryReady = false; inFlight = nil; summaryInFlight = nil
         tap = nil; spool = nil; pending.removeAll(); refreshSourceMenus()
         if let session, !preserved { try? FileManager.default.removeItem(at: session) }
-        session = nil; latestContext = nil
+        session = nil; sessionPair = nil; finalizingTitle = false; titleRequested = false; latestContext = nil; recordingFile = nil; recordingStartedAt = nil
         startButton.title = "Начать"; startButton.isEnabled = true; statusItem?.button?.title = "Сводка"
         statusText = preserved ? "Необработанные фрагменты сохранены · «Дописать сохранённые фрагменты»" : "Остановлено · расшифровка сохранена"
         if qaEnd != nil { diagnostic(["event": "qa_complete", "hasSummary": hasSummary]); qaEnd = nil }
@@ -682,12 +815,19 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
         }.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
     @objc func recoverPending() {
-        guard !running else { return }
+        guard !running, !quitAfterDrain else { return }
+        cancelPreparation()
+        guard runtimeReady else { prepareRuntime { [weak self] in self?.recoverPending() }; return }
+        do { try recoverRenameJournals() }
+        catch { statusText = "Не удалось восстановить имена записи: \(error.localizedDescription)"; return }
         guard let directory = recoverableSessions().first else { statusText = "Несохранённых фрагментов нет"; return }
         do {
+            try SessionFiles.recover(in: directory)
             let data = try Data(contentsOf: directory.appendingPathComponent("session.json"))
             let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             guard let path = manifest?["transcript"] as? String else { throw CocoaError(.fileReadCorruptFile) }
+            recordingFile = (manifest?["audio"] as? String).map { URL(fileURLWithPath: $0) }
+            recordingStartedAt = manifest?["audio_started"] as? Double
             var chunks = [AudioChunk]()
             for wav in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) where wav.lastPathComponent.hasPrefix("chunk-") && wav.pathExtension == "wav" {
                 let metadata = wav.deletingPathExtension().appendingPathExtension("json")
@@ -710,8 +850,18 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
                 }
             }
             session = directory; transcriptFile = URL(fileURLWithPath: path); pending = chunks.sorted { $0.id < $1.id }
-            running = true; draining = true; drainStarted = Date(); captureDrained = true; preservePending = false; checkingAudio = false
-            generation = UUID(); failures["transcribe"] = 0; inFlight = nil
+            running = true; draining = true; drainStarted = MonotonicTime.now; captureDrained = true; preservePending = false; checkingAudio = false
+            generation = UUID(); watchdogs["transcribe"]?.reset(); watchdogs["summarize"]?.reset(); inFlight = nil
+            sessionPair = nil
+            if let audio = recordingFile, let stamp = manifest?["started"] as? Double,
+               let idString = manifest?["session_id"] as? String, let id = UUID(uuidString: idString),
+               audio.deletingLastPathComponent() == transcriptFile?.deletingLastPathComponent(),
+               let transcriptFile {
+                sessionPair = SessionFiles.Pair(dayDirectory: transcriptFile.deletingLastPathComponent(), transcript: transcriptFile,
+                    audio: audio, startedAt: Date(timeIntervalSince1970: stamp), id: id,
+                    clock: String(transcriptFile.lastPathComponent.prefix(8)))
+            }
+            finalizingTitle = false; titleRequested = false
             startButton.title = "Сохранение фрагментов…"; startButton.isEnabled = false
             statusText = "Восстанавливаю расшифровку из сохранённых фрагментов · звук не захватывается"
             if pending.isEmpty { finishStop() } else { startWorker("transcribe") }
@@ -723,6 +873,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelega
 @main struct MeetingMain {
     static func main() {
         let application = NSApplication.shared
+        if let identifier = Bundle.main.bundleIdentifier,
+           let existing = NSRunningApplication.runningApplications(withBundleIdentifier: identifier).first(where: { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }) {
+            existing.activate(options: []); return
+        }
         let delegate = App()
         application.delegate = delegate
         application.run()

@@ -1,0 +1,42 @@
+{
+  "verification_scope": "Historical verification of an earlier 0.7.0-beta candidate. Artifact hashes below do not identify this final source snapshot or its final binary.",
+  "final_binary_identity": "Publish separately in release SHA256SUMS; do not infer it from this historical receipt.",
+  "format": 1,
+  "portable_smoke": "passed; see .build.noindex/MeetingSummary-0.7.0-beta-macos-arm64.receipt.json and .verification.json",
+  "bootstrap_unit_tests": 3,
+  "real_model_download": "interrupted after approximately92MiB speech asset because transfer was too slow; temporary files removed",
+  "full_public_model_download_verified": false,
+  "public_9b_inference_tested": false,
+  "public_4b_inference_tested": false,
+  "actual_8gb_hardware_tested": false,
+  "actual_macos_14_4_hardware_tested": false,
+  "installed_model_equivalence": "Not established. Matching names/shapes/dtypes and three sampled tensor byte ranges do not establish whole-file equality. Reverse full-payload repack failed the expected official SHA256; manifests remain distinct.",
+  "signing": {
+    "read_only_identity_check": "one valid Apple Development identity; no Developer ID Application identity",
+    "notarization": "not attempted; no explicit notary profile was supplied; default notarytool history requires credentials"
+  },
+  "meeting_data_accessed": false,
+  "audio_captured_or_played": false,
+  "models_loaded_by_packaging": false,
+  "runtime_bootstrap_lifecycle_checks": [
+    "cancel before launch",
+    "one child for concurrent prepare observers",
+    "cancel during child + fresh retry",
+    "cancellation suppresses queued success/progress"
+  ],
+  "light_config_tokenizer_check": {
+    "model_type": "qwen3_5",
+    "classes": [
+      "Model",
+      "ModelArgs"
+    ],
+    "tokenizer": "TokenizerWrapper",
+    "russian_roundtrip": true,
+    "models_loaded": false
+  },
+  "candidate_sha256": "ea1084b3de39bdab3aea45e4bb6d5178e04a75ed324e6acf01d833c2921f6f06",
+  "candidate_worker_id": "89778948f40ceb5a3624",
+  "candidate_worker_freeze_matches": true,
+  "manual_macos_ci_workflow_created": true,
+  "manual_macos_ci_workflow_run": false
+}

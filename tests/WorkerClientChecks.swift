@@ -21,12 +21,14 @@ struct WorkerClientChecks {
         let session = FileManager.default.temporaryDirectory.appendingPathComponent("worker-client-checks-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: session) }
-        func client(resume: Bool = false) -> WorkerClient {
-            WorkerClient(mode: "transcribe", session: session, transcript: nil, resume: resume,
+        func client(resume: Bool = false, audio: URL? = nil) -> WorkerClient {
+            WorkerClient(mode: "transcribe", session: session, transcript: audio == nil ? nil : session.appendingPathComponent("transcript.txt"), resume: resume,
+                         audioFile: audio, audioStartedAt: audio == nil ? nil : 123.5,
                          executableURL: URL(fileURLWithPath: "/usr/bin/python3"), scriptURL: fixture)
         }
 
-        let worker = client()
+        let audio = session.appendingPathComponent("Встреча с пробелами.wav")
+        let worker = client(audio: audio)
         var events: [[String: Any]] = []
         var status: Int32?
         var finalDeliveredBeforeExit = false
@@ -42,6 +44,9 @@ struct WorkerClientChecks {
         }
         try worker.start()
         expect(pump(until: { events.contains { $0["event"] as? String == "ready" } }), "ready was not delivered")
+        let ready = events.first { $0["event"] as? String == "ready" }
+        expect(ready?["audio_file"] as? String == audio.path && ready?["audio_start"] as? Double == 123.5,
+               "audio path/start metadata did not reach the child intact")
         expect(events.filter { $0["event"] as? String == "protocol_error" }.count == 2,
                "malformed and oversized stdout must each report a bounded protocol error")
         let diagnostics = events.filter { ["protocol_error", "diagnostic"].contains($0["event"] as? String ?? "") }

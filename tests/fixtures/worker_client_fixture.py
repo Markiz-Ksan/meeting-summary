@@ -10,6 +10,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--mode')
 parser.add_argument('--session')
 parser.add_argument('--transcript-file')
+parser.add_argument('--audio-file')
+parser.add_argument('--audio-start', type=float)
 parser.add_argument('--resume', action='store_true')
 args = parser.parse_args()
 
@@ -26,7 +28,7 @@ else:
     sys.stderr.write('PRIVATE_DO_NOT_EXPOSE' * 1000)
     sys.stderr.flush()
 
-emit('ready', pid=os.getpid())
+emit('ready', pid=os.getpid(), audio_file=args.audio_file, audio_start=args.audio_start)
 for line in sys.stdin:
     request = json.loads(line)
     if request.get('op') == 'exit':

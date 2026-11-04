@@ -18,7 +18,46 @@ def same_utterance(old, new):
     # equate a short repeated word with an entire unrelated utterance.
     if min(len(old.split()), len(new.split())) >= 2 and (old.startswith(new + ' ') or new.startswith(old + ' ')):
         return True
+    old_words, new_words = set(old.split()), set(new.split())
+    # Similar wording can carry the opposite fact. Preserve distinct close
+    # utterances rather than treating a changed amount/negation as a typo.
+    if bool(old_words & {'не', 'нет', 'not', 'never'}) != bool(new_words & {'не', 'нет', 'not', 'never'}):
+        return False
+    numbers = lambda value: set(re.findall(r'\d+(?:[.,]\d+)?', value))
+    a, b = numbers(old), numbers(new)
+    if a and b and a != b:
+        return False
+    times = {'сегодня', 'завтра', 'вчера', 'понедельник', 'понедельника', 'вторник', 'вторника', 'среду', 'среды', 'четверг', 'четверга', 'пятницу', 'пятницы', 'субботу', 'субботы', 'воскресенье', 'воскресенья'}
+    a, b = old_words & times, new_words & times
+    if a and b and a != b:
+        return False
     return SequenceMatcher(None, old, new, autojunk=False).ratio() >= 0.82
+
+
+def partial_utterance(short, long):
+    """A clipped decoder prefix/suffix, only used with correlated audio times.
+
+    Morphological endings may change at a clipped boundary. Require a whole
+    ordered run of at least three words; never erase a changed number/negation.
+    """
+    left, right = short.split(), long.split()
+    if len(left) < 3 or len(left) >= len(right):
+        return False
+    def run(candidate):
+        for a, b in zip(left, candidate):
+            if a == b:
+                continue
+            if a.isdigit() or b.isdigit() or a in {'не', 'нет'} or b in {'не', 'нет'}:
+                return False
+            common = 0
+            for x, y in zip(a, b):
+                if x != y:
+                    break
+                common += 1
+            if common < 4 or common / max(len(a), len(b)) < .65:
+                return False
+        return True
+    return run(right[:len(left)]) or run(right[-len(left):])
 
 
 class RecentTranscript:
@@ -27,9 +66,12 @@ class RecentTranscript:
         self.max_entries = max_entries
         self.entries = []
 
-    def update(self, text, timestamp, audio_seconds):
+    def update(self, text, timestamp, audio_seconds, segments=None):
         self.entries = [e for e in self.entries if timestamp-e[0] <= self.seconds]
-        new = sentences(text)
+        timed = segments is not None
+        pairs = [(stamp, value.strip()) for stamp, value in segments if value.strip()] if timed else []
+        new = [value for _, value in pairs] if timed else sentences(text)
+        new_stamps = [stamp for stamp, _ in pairs]
         if not new:
             return self.text
         window_start = timestamp-audio_seconds
@@ -42,7 +84,7 @@ class RecentTranscript:
         matches = [[False]*m for _ in range(n)]
         for i in range(n-1, -1, -1):
             for j in range(m-1, -1, -1):
-                matches[i][j] = same_utterance(old_keys[i], new_keys[j])
+                matches[i][j] = (not timed or abs(recent[i][0]-new_stamps[j]) <= 2) and (same_utterance(old_keys[i], new_keys[j]) or (timed and abs(recent[i][0]-new_stamps[j]) <= .8 and (partial_utterance(old_keys[i], new_keys[j]) or partial_utterance(new_keys[j], old_keys[i]))))
                 scores[i][j] = max(scores[i+1][j], scores[i][j+1], (1+scores[i+1][j+1]) if matches[i][j] else 0)
         pairs = []
         i = j = 0
@@ -60,29 +102,33 @@ class RecentTranscript:
         merged = list(older)
         old_cursor = new_cursor = 0
 
-        def append_recovered(items, stamp):
-            for value in items:
+        def append_recovered(items, stamp, new_index):
+            for offset, value in enumerate(items):
+                item_stamp = new_stamps[new_index+offset] if timed else stamp
                 key = normalized(value)
                 # Shifted audio windows often start halfway through a sentence.
                 # Compare only the recent tail: the same phrase later in a
                 # meeting must still be recorded as a new occurrence.
-                if recent and any(normalized(sentence) != key and normalized(sentence).endswith(key) for _, sentence in merged[-len(recent):]):
+                tail = [e for e in merged if abs(e[0]-item_stamp) <= 3] if timed else (merged[-len(recent):] if recent else [])
+                if any(normalized(sentence) != key and normalized(sentence).endswith(key) for _, sentence in tail):
                     continue
-                merged.append((stamp, value))
+                merged.append((item_stamp, value))
 
         for old_index, new_index in pairs:
             merged.extend(recent[old_cursor:old_index])
-            append_recovered(new[new_cursor:new_index], recent[old_index][0])
+            append_recovered(new[new_cursor:new_index], recent[old_index][0], new_cursor)
             old_time, old_sentence = recent[old_index]
             replacement = new[new_index]
             # Preserve the complete version if the new window clips its prefix
             # or suffix; otherwise accept an ASR correction at the same point.
-            if normalized(old_sentence).endswith(normalized(replacement)) or normalized(old_sentence).startswith(normalized(replacement) + ' '):
+            if normalized(old_sentence).endswith(normalized(replacement)) or normalized(old_sentence).startswith(normalized(replacement) + ' ') or (timed and partial_utterance(normalized(replacement), normalized(old_sentence))):
                 replacement = old_sentence
             merged.append((old_time, replacement))
             old_cursor, new_cursor = old_index + 1, new_index + 1
         merged.extend(recent[old_cursor:])
-        append_recovered(new[new_cursor:], timestamp)
+        append_recovered(new[new_cursor:], timestamp, new_cursor)
+        if timed:
+            merged.sort(key=lambda entry: entry[0])
         self.entries = merged
         if self.max_entries is not None:
             self.entries = self.entries[-self.max_entries:]

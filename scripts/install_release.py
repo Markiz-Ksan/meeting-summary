@@ -9,13 +9,14 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import signal
 import subprocess
 import tempfile
 
-WORKER_FILES = ('worker.py', 'recent_transcript.py', 'summary_writer.py', 'transcript_log.py')
+WORKER_FILES = ('worker.py', 'recent_transcript.py', 'summary_writer.py', 'transcript_log.py', 'session_title.py')
 
 
 class RollbackError(RuntimeError):
@@ -51,7 +52,12 @@ def install_release(app_source, app_destination, worker_source, worker_destinati
         raise ValueError('Release sources and destinations must not overlap')
     if not app_source.is_dir():
         raise FileNotFoundError(app_source)
-    for name in WORKER_FILES:
+    # Older verified backups have four modules. New title-capable workers must
+    # include their fifth dependency; legacy restoration must remain usable.
+    worker_files = tuple(name for name in WORKER_FILES if name != 'session_title.py' or (worker_source/name).is_file())
+    if 'session_title.py' not in worker_files and re.search(r'(?m)^\s*(?:from\s+session_title\s+import|import\s+session_title\b)', (worker_source/'worker.py').read_text()):
+        raise FileNotFoundError(worker_source/'session_title.py')
+    for name in worker_files:
         if not (worker_source / name).is_file():
             raise FileNotFoundError(worker_source / name)
     for destination in (app_destination, worker_destination):
@@ -74,7 +80,7 @@ def install_release(app_source, app_destination, worker_source, worker_destinati
             verify(app['staged'])
             worker['staged'].mkdir()
             hashes = {}
-            for name in WORKER_FILES:
+            for name in worker_files:
                 shutil.copyfile(worker_source / name, worker['staged'] / name)
                 hashes[name] = digest(worker_source / name)
                 if digest(worker['staged'] / name) != hashes[name]:
@@ -87,7 +93,7 @@ def install_release(app_source, app_destination, worker_source, worker_destinati
                 replace(component['staged'], component['destination'])
 
             verify(app_destination)
-            if any(digest(worker_destination / name) != hashes[name] for name in WORKER_FILES):
+            if any(digest(worker_destination / name) != hashes[name] for name in worker_files):
                 raise OSError('Installed worker hash mismatch')
             receipt = dict(app_destination=str(app_destination), worker_destination=str(worker_destination),
                            app_backup=str(app['backup']) if app['backup'].exists() else None,

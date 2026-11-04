@@ -1,0 +1,30 @@
+Model attributions and modifications
+
+Speech: NVIDIA Parakeet TDT 0.6B v3, quantized to MLX 4-bit by Animas Labs.
+Source: https://huggingface.co/animaslabs/parakeet-tdt-0.6b-v3-mlx-4bit
+Revision: 65247a0a9e735426eba06056a9535f7e67dcbbb9
+Original: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+License: Creative Commons Attribution 4.0 International (CC BY 4.0).
+License URL and legal terms: https://creativecommons.org/licenses/by/4.0/legalcode.en
+MeetingOverlay distributes selected original configuration/tokenizer files and
+uses the same 4-bit weights. No endorsement by the authors is implied.
+
+Summary: Qwen3.5-9B by Qwen / Alibaba Cloud, MLX 4-bit conversion by mlx-community.
+Source: https://huggingface.co/mlx-community/Qwen3.5-9B-MLX-4bit
+Revision: 938d8919941c6e7efd3c7150eff7fe9d12afa631
+Original: https://huggingface.co/Qwen/Qwen3.5-9B
+License: Apache License 2.0 (included in APACHE-2.0.txt).
+MeetingOverlay modifications: tokenizer configuration adapted to the installed
+Qwen2Tokenizer-compatible text-only MLX pipeline; tokenizer/processor files
+preserved from the deployed application. The standard public-weight profile
+keeps immutable upstream weights and verifies models.lock.json. A separate
+models.installed.lock.json identifies the exact deployed model assets; their
+identity with public weights is not inferred.
+
+The additive light profile uses Qwen3.5-4B, MLX 4-bit by mlx-community.
+Source: https://huggingface.co/mlx-community/Qwen3.5-4B-MLX-4bit
+Revision: 32f3e8ecf65426fc3306969496342d504bfa13f3
+License: Apache License 2.0; same explicit tokenizer/processor adaptation.
+
+Runtime: CPython 3.12.13; license included in PYTHON-3.12.txt. Vendored Python
+packages retain upstream .dist-info licenses and notices inside the bundle.

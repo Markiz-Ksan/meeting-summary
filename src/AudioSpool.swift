@@ -8,11 +8,16 @@ struct AudioChunk {
     let duration: Double
     var metadata: URL { path.deletingPathExtension().appendingPathExtension("json") }
     var request: [String: Any] { ["path": path.path, "timestamp": timestamp, "request_id": id] }
-    func acknowledge() {
+    func acknowledge() throws {
         do {
-            if FileManager.default.fileExists(atPath: path.path) { try FileManager.default.removeItem(at: path) }
-            try? FileManager.default.removeItem(at: metadata)
-        } catch { /* Keep metadata beside audio so recovery can identify an already committed request. */ }
+            // Do not use fileExists: an inaccessible directory can look absent.
+            try FileManager.default.removeItem(at: path)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+            // Idempotent after a successful prior cleanup.
+        }
+        // Only a remaining WAV can be replayed. A sidecar alone is harmless;
+        // keep it for a later cleanup if its own deletion is denied.
+        try? FileManager.default.removeItem(at: metadata)
     }
 }
 
@@ -28,10 +33,19 @@ final class AudioSpool {
     private var counter = 0
     private var newFrames = 0
     private var failed = false
-    init(directory: URL) { self.directory = directory }
+    private let recording: MeetingRecording?
+    init(directory: URL, recording: MeetingRecording? = nil) {
+        self.directory = directory; self.recording = recording
+    }
     func add(_ values: [Float], rate: Double, timestamp: Double) {
         queue.async {
             guard !self.failed, rate > 0 else { return }
+            do { try self.recording?.append(values, rate: rate, timestamp: timestamp) }
+            catch {
+                self.failed = true
+                DispatchQueue.main.async { self.onError?(error) }
+                return
+            }
             if self.rate != rate {
                 self.flushTail()
                 self.samples.removeAll(); self.newFrames = 0; self.rate = rate
@@ -50,6 +64,8 @@ final class AudioSpool {
     func finish(_ completion: @escaping () -> Void) {
         queue.async {
             self.flushTail(); self.samples.removeAll(); self.newFrames = 0
+            do { try self.recording?.finish() }
+            catch { DispatchQueue.main.async { self.onError?(error) } }
             DispatchQueue.main.async(execute: completion)
         }
     }

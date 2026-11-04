@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Сводка встречи
+Name[en]=Meeting Summary
+Comment=Локальная запись, расшифровка и краткая сводка встреч
+Exec=meeting-summary
+Icon=meeting-summary
+Terminal=false
+Categories=AudioVideo;Audio;Utility;
+StartupNotify=true

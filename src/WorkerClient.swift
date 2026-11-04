@@ -8,6 +8,8 @@ final class WorkerClient {
     private let session: URL
     private let transcript: URL?
     private let resume: Bool
+    private let audioFile: URL?
+    private let audioStartedAt: Double?
     private let executableOverride: URL?
     private let scriptOverride: URL?
     private let queue = DispatchQueue(label: "local.meeting.worker-client", qos: .userInitiated)
@@ -49,11 +51,14 @@ final class WorkerClient {
     var isRunning: Bool { synchronized { process?.isRunning == true } }
 
     init(mode: String, session: URL, transcript: URL?, resume: Bool = false,
+         audioFile: URL? = nil, audioStartedAt: Double? = nil,
          executableURL: URL? = nil, scriptURL: URL? = nil) {
         self.mode = mode
         self.session = session
         self.transcript = transcript
         self.resume = resume
+        self.audioFile = audioFile
+        self.audioStartedAt = audioStartedAt
         self.executableOverride = executableURL
         self.scriptOverride = scriptURL
         queue.setSpecific(key: queueKey, value: true)
@@ -87,25 +92,19 @@ final class WorkerClient {
             lastStderrDiagnostic = .distantPast
             protocolErrors = 0
 
-            let root = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/MeetingOverlay")
             let child = Process()
-            child.executableURL = executableOverride ?? root.appendingPathComponent("runtime/.venv/bin/python")
-            var arguments = ["-u", (scriptOverride ?? root.appendingPathComponent("src/worker.py")).path,
+            child.executableURL = executableOverride ?? AppPaths.python
+            var arguments = ["-u", (scriptOverride ?? AppPaths.workerScript).path,
                              "--mode", mode, "--session", session.path]
             if mode == "transcribe", let transcript {
                 arguments += ["--transcript-file", transcript.path]
+                if let audioFile, let audioStartedAt {
+                    arguments += ["--audio-file", audioFile.path, "--audio-start", String(audioStartedAt)]
+                }
             }
             if resume { arguments.append("--resume") }
             child.arguments = arguments
-            var environment = ProcessInfo.processInfo.environment
-            environment["HF_HUB_OFFLINE"] = "1"
-            environment["HF_HUB_DISABLE_TELEMETRY"] = "1"
-            environment["TRANSFORMERS_OFFLINE"] = "1"
-            environment["TOKENIZERS_PARALLELISM"] = "false"
-            environment["OMP_NUM_THREADS"] = "4"
-            environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-            child.environment = environment
+            child.environment = AppPaths.workerEnvironment
 
             let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
             child.standardInput = stdin

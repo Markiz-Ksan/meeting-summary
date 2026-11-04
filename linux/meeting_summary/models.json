@@ -1,0 +1,39 @@
+{
+  "speech": {
+    "repo": "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+    "revision": "2bda32ec70b097a55adaa07d9a7173915b43cc78",
+    "files": [
+      {
+        "filename": "decoder.int8.onnx",
+        "sha256": "179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e",
+        "size": 11845275
+      },
+      {
+        "filename": "encoder.int8.onnx",
+        "sha256": "acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247",
+        "size": 652184281
+      },
+      {
+        "filename": "joiner.int8.onnx",
+        "sha256": "3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3",
+        "size": 6355277
+      },
+      {
+        "filename": "tokens.txt",
+        "sha256": "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
+        "size": 93939
+      }
+    ]
+  },
+  "summary": {
+    "repo": "bartowski/Qwen_Qwen3.5-9B-GGUF",
+    "revision": "182be2fd6c7bc44887d88a91cb03ff009cc9f549",
+    "files": [
+      {
+        "filename": "Qwen_Qwen3.5-9B-Q4_K_M.gguf",
+        "sha256": "d784ce9eda1a5a7b51e8f705a9e6310844bf4f173654d115823c775fdea56d43",
+        "size": 6169341984
+      }
+    ]
+  }
+}

@@ -47,6 +47,19 @@ class RecentTests(unittest.TestCase):
   self.assertIn('номер 30 ',r.text)
 
 class MissingSpeechRegressionTests(unittest.TestCase):
+ def test_late_recovered_speech_keeps_audio_start_not_current_chunk_time(self):
+  r=RecentTranscript()
+  r.update('Кодовое слово водопад.',16,16,segments=[(8.1,'Кодовое слово водопад.')])
+  r.update('Кодовое слово водопад. Кодовое слово дельфин.',46,45,
+           segments=[(8.2,'Кодовое слово водопад.'),(38.1,'Кодовое слово дельфин.')])
+  self.assertEqual([round(t,1) for t,_ in r.entries],[8.1,38.1])
+
+ def test_similar_later_phrase_cannot_relabel_earlier_speech(self):
+  r=RecentTranscript()
+  r.update('Контрольная точка один.',16,16,segments=[(8.,'Контрольная точка один.')])
+  r.update('Контрольная точка два.',46,45,segments=[(38.,'Контрольная точка два.')])
+  self.assertEqual(r.entries,[(8.,'Контрольная точка один.'),(38.,'Контрольная точка два.')])
+
  def test_a_decode_with_no_shared_sentences_never_erases_history(self):
   r=RecentTranscript()
   r.update('Утвердили бюджет проекта. Клиент получил договор.',6,6)
@@ -81,3 +94,43 @@ class MissingSpeechRegressionTests(unittest.TestCase):
   self.assertEqual(len(r.entries),2)
 
 if __name__=='__main__': unittest.main()
+
+class TimedFragmentTests(unittest.TestCase):
+ def test_inflected_partial_prefix_is_replaced_by_full_phrase(self):
+  r=RecentTranscript()
+  r.update('Контрольная точка два кодовое слово.',12,12,segments=[(8.0,'Контрольная точка два кодовое слово.')])
+  r.update('Контрольная точка два кодовые слова зелёный дельфин.',18,18,segments=[(8.1,'Контрольная точка два кодовые слова зелёный дельфин.')])
+  self.assertEqual(r.entries,[(8.0,'Контрольная точка два кодовые слова зелёный дельфин.')])
+ def test_clipped_variant_never_shrinks_saved_complete_phrase(self):
+  r=RecentTranscript()
+  r.update('Контрольная точка два кодовые слова зелёный дельфин.',12,12,segments=[(8.,'Контрольная точка два кодовые слова зелёный дельфин.')])
+  r.update('Контрольная точка два кодовое слово.',18,18,segments=[(8.1,'Контрольная точка два кодовое слово.')])
+  self.assertIn('зелёный дельфин',r.text)
+  self.assertEqual(len(r.entries),1)
+ def test_similar_fragments_at_different_times_are_distinct(self):
+  r=RecentTranscript()
+  r.update('Контрольная точка два кодовое слово.',12,12,segments=[(8.,'Контрольная точка два кодовое слово.')])
+  r.update('Контрольная точка два кодовые слова зелёный дельфин.',24,24,segments=[(20.,'Контрольная точка два кодовые слова зелёный дельфин.')])
+  self.assertEqual(len(r.entries),2)
+
+class CriticalDifferenceTests(unittest.TestCase):
+ def test_close_opposite_utterances_are_not_erased(self):
+  r=RecentTranscript()
+  r.update('Доставку обещаем сегодня.',12,12,segments=[(8.,'Доставку обещаем сегодня.')])
+  r.update('Доставку не обещаем сегодня.',18,18,segments=[(9.,'Доставку не обещаем сегодня.')])
+  self.assertEqual(len(r.entries),2)
+ def test_close_different_amounts_are_not_erased(self):
+  r=RecentTranscript()
+  r.update('Стоимость услуги 100 рублей.',12,12,segments=[(8.,'Стоимость услуги 100 рублей.')])
+  r.update('Стоимость услуги 200 рублей.',18,18,segments=[(9.,'Стоимость услуги 200 рублей.')])
+  self.assertEqual(len(r.entries),2)
+ def test_close_different_deadlines_are_not_erased(self):
+  r=RecentTranscript()
+  r.update('Отчёт отправим сегодня.',12,12,segments=[(8.,'Отчёт отправим сегодня.')])
+  r.update('Отчёт отправим завтра.',18,18,segments=[(9.,'Отчёт отправим завтра.')])
+  self.assertEqual(len(r.entries),2)
+ def test_extending_a_clipped_prefix_can_add_a_negation(self):
+  r=RecentTranscript()
+  r.update('Сегодня доставку',12,12,segments=[(8.,'Сегодня доставку')])
+  r.update('Сегодня доставку не обещаем.',18,18,segments=[(8.1,'Сегодня доставку не обещаем.')])
+  self.assertEqual(r.text,'Сегодня доставку не обещаем.')

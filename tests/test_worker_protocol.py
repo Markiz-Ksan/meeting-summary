@@ -41,6 +41,19 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertEqual(events[-1]['request_id'], 42)
         self.assertEqual(events[-1]['context_timestamp'], 123.5)
 
+    def test_audio_metadata_arguments_reach_persistent_transcript_without_model_load(self):
+        output = io.StringIO()
+        transcript = self.directory / 'session.txt'
+        audio = self.directory / 'saved recording.wav'
+        argv = ['worker', '--mode', 'transcribe', '--session', str(self.directory),
+                '--transcript-file', str(transcript), '--audio-file', str(audio), '--audio-start', '1700000000.25']
+        with patch.object(sys, 'argv', argv), patch.object(sys, 'stdin', io.StringIO('')), \
+                patch.object(worker, 'Engine', return_value=SimpleNamespace()), contextlib.redirect_stdout(output):
+            self.assertEqual(worker.main(), 0)
+        self.assertIn('Аудиозапись: ' + str(audio), transcript.read_text())
+        self.assertIn('Начало аудиозаписи (00:00:00): ', transcript.read_text())
+        self.assertEqual(json.loads(output.getvalue())['event'], 'ready')
+
     def test_archive_failure_is_retryable_and_never_acks_audio(self):
         def process(*args, **kwargs):
             raise worker.ArchiveWriteError('disk full')
@@ -103,6 +116,20 @@ class WorkerProtocolTests(unittest.TestCase):
         result = engine.process(self.wav, 6, summarize=False, keep_audio=True)
         self.assertEqual(result['summary_context'], 'Встречу перенесли на пятницу. Анна проверит')
         self.assertTrue(self.wav.exists())
+
+    def test_process_passes_aligned_audio_times_to_archive_and_recent_context(self):
+        engine = worker.Engine.__new__(worker.Engine)
+        engine.audio = [0]*45
+        engine.speech = SimpleNamespace(preprocessor_config=SimpleNamespace(sample_rate=1))
+        engine.transcript_log = TranscriptLog(self.directory/'aligned.txt')
+        engine.mx = SimpleNamespace(get_active_memory=lambda:0)
+        engine.recent = RecentTranscript(); engine.history = deque()
+        engine.transcript_segments = [(102.,'Первая реплика.'),(132.,'Вторая реплика.')]
+        engine.transcribe = lambda *args:'Первая реплика. Вторая реплика.'
+        engine.process(self.wav,145.,summarize=False,keep_audio=True,request_id=7)
+        self.assertEqual(engine.transcript_log.history.entries,engine.transcript_segments)
+        self.assertEqual(engine.recent.entries,engine.transcript_segments)
+        self.assertTrue(engine.transcript_log.was_committed(7,145.))
 
 class CheckpointReplayTests(unittest.TestCase):
     def test_restart_does_not_redecode_committed_input_with_different_context(self):

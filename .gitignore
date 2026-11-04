@@ -1,5 +1,6 @@
-# Local runtime, weights, caches and credentials
-runtime/
+# Runtime, captures, private diagnostics, credentials, generated artifacts
+runtime/*
+!runtime/requirements.lock
 .venv/
 venv/
 __pycache__/
@@ -16,15 +17,22 @@ signing-identity.txt
 *.mobileprovision
 *.app/
 *.dmg
-# Local meeting data and machine-specific diagnostics
+*.deb
+*.AppImage
+*.zip
+.backups/
+.build.noindex/
+linux-artifacts/
+.linux-test-data/
 sessions/
 transcripts/
+Сводка встреч/
 Расшифровки встреч/
 *.log
 *.jsonl
 evaluation-results/
-# Only the explicitly reviewed test bundle is tracked under dist.
-dist/*
-!dist/README.md
-!dist/SHA256SUMS
-!dist/MeetingSummary-0.6.4-test.zip
+*.wav
+!tests/meeting-sample.wav
+*.safetensors
+*.gguf
+*.onnx

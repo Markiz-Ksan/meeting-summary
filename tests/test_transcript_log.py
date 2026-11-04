@@ -59,6 +59,37 @@ class TranscriptLossRegressionTests(unittest.TestCase):
             self.assertEqual(log.history.entries[0][0],6)
 
 class TranscriptRestartTests(unittest.TestCase):
+    def test_aligned_starts_are_saved_and_checkpoint_still_uses_chunk_identity(self):
+        from datetime import datetime
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'session.txt'
+            base = datetime(2026,11,4,12,0,0).timestamp()
+            log = TranscriptLog(path)
+            log.update('Первая реплика. Вторая реплика.',base+45,45,request_id=8,
+                       segments=[(base+2,'Первая реплика.'),(base+32,'Вторая реплика.')])
+            self.assertIn('[12:00:02] Первая реплика.',path.read_text())
+            self.assertIn('[12:00:32] Вторая реплика.',path.read_text())
+            restored = TranscriptLog(path,resume=True)
+            self.assertTrue(restored.was_committed(8,base+45))
+            self.assertEqual(restored.history.entries,[(base+2,'Первая реплика.'),(base+32,'Вторая реплика.')])
+
+    def test_audio_reference_and_zero_time_survive_resume(self):
+        from datetime import datetime
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'session.txt'
+            audio = Path(directory) / 'audio/session.wav'
+            stamp = datetime(2026, 11, 4, 12, 0, 0).timestamp()
+            log = TranscriptLog(path, audio_path=audio, audio_started_at=stamp)
+            log.update('Тестовая реплика.', stamp+6, 6, request_id=1)
+            resumed = TranscriptLog(path, resume=True)
+            resumed.update('Следующая реплика.', stamp+12, 6, request_id=2)
+            content = path.read_text()
+            self.assertIn('Аудиозапись: ' + str(audio), content)
+            self.assertIn('Начало аудиозаписи (00:00:00): 2026-11-04T12:00:00', content)
+            self.assertEqual(content.count('Аудиозапись:'), 1)
+            self.assertIn('Тестовая реплика.', content)
+            self.assertIn('Следующая реплика.', content)
+
     def test_resume_and_replay_after_lost_ack_is_idempotent(self):
         from datetime import datetime
         with tempfile.TemporaryDirectory() as directory:
@@ -105,3 +136,21 @@ class TranscriptRestartTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class RecordingStartDateTests(unittest.TestCase):
+    def test_worker_starting_after_midnight_uses_recording_start_day(self):
+        from datetime import datetime
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'session.txt'
+            started=datetime(2026,11,4,23,59,58).timestamp()
+            log=TranscriptLog(path,audio_path=Path(tmp)/'session.wav',audio_started_at=started)
+            log.update('Первая фраза.',started+1,1,segments=[(started+1,'Первая фраза.')])
+            log.update('Вторая фраза.',started+4,4,segments=[(started+4,'Вторая фраза.')])
+            # Simulate the older misleading creation date while preserving the
+            # authoritative audio-zero anchor and midnight-spanning clock rows.
+            text=path.read_text();text=text.replace('Начало: 2026-11-04','Начало: 2026-11-05')
+            path.write_text(text)
+            restored=TranscriptLog(path,resume=True)
+            self.assertEqual([stamp for stamp,_ in restored.history.entries],[started+1,started+4])
+            self.assertEqual(log.header.splitlines()[1][:18],'Начало: 2026-11-04')

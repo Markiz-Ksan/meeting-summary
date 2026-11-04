@@ -108,6 +108,64 @@ class SummaryIntegrityTests(unittest.TestCase):
     def test_colon_explaining_absence_supports_causal_paraphrase(self):
         self.assertEqual(self.render('Нужно обсудить прототип завтра. В работу его пока не берём: оценки трудозатрат нет.', [{'summary':'В работу прототип пока не берут из-за отсутствия оценок.', 'evidence':'В работу его пока не берём: оценки трудозатрат нет.'}]), '• В работу прототип пока не берут из-за отсутствия оценок.')
 
+    def test_negated_explanation_after_colon_is_supported(self):
+        self.assertEqual(self.render('В рубли сейчас не пересчитываем: курс не выбрали.', [{'summary':'Пересчёт в рубли не производится из-за отсутствия выбранного курса.','evidence':'В рубли сейчас не пересчитываем: курс не выбрали.'}]),'• Пересчёт в рубли не производится из-за отсутствия выбранного курса.')
+
+    def test_selection_explanation_after_colon_is_supported(self):
+        source='Макет выбрали второй: он помещается на телефоне без горизонтальной прокрутки.'
+        self.assertEqual(self.render(source,[{'summary':'Выбран второй макет, так как он помещается на телефоне без горизонтальной прокрутки.','evidence':source}]),'• Выбран второй макет, так как он помещается на телефоне без горизонтальной прокрутки.')
+
+    def test_clock_colon_does_not_justify_causal_link(self):
+        source='Встреча в 14:30. Отчёт подготовят завтра.'
+        with self.assertRaises(ValueError):
+            self.render(source,[{'summary':'Встреча в 14:30, потому что отчёт подготовят завтра.','evidence':source}])
+
+    def test_topic_list_colon_does_not_justify_causal_link(self):
+        source='Планы: встреча в среду, смета в четверг.'
+        with self.assertRaises(ValueError):
+            self.render(source,[{'summary':'Смета в четверг, потому что встреча в среду.','evidence':source}])
+
+    def test_absent_confirmation_is_a_negative_state(self):
+        self.assertEqual(self.render('Подтверждения пока нет.',[{'summary':'Подтверждение пока отсутствует.','evidence':'Подтверждения пока нет.'}]),'• Подтверждение пока отсутствует.')
+
+    def test_opposition_with_explicit_negative_reason_after_colon(self):
+        source='Борис против: тесты не закончены.'
+        self.assertEqual(self.render(source,[{'summary':'Борис против из-за незаконченных тестов.','evidence':source}]),'• Борис против из-за незаконченных тестов.')
+
+    def test_whole_hour_clock_format_is_equivalent(self):
+        source='Отчёт нужен к 15 часам.'
+        self.assertEqual(self.render(source,[{'summary':'Отчёт нужен к 15:00.','evidence':source}]),'• Отчёт нужен к 15:00.')
+
+    def test_quantity_is_not_a_clock_time(self):
+        source='Стоимость 15 рублей.'
+        with self.assertRaises(ValueError):
+            self.render(source,[{'summary':'Стоимость назначена на 15:00.','evidence':source}])
+
+    def test_clock_must_match_actual_time_not_an_unrelated_number(self):
+        source='Отчёт нужен к 15 часам. Стоимость доставки 16 рублей.'
+        with self.assertRaises(ValueError):
+            self.render(source,[{'summary':'Отчёт нужен к 16:00.','evidence':source}])
+
+    def test_count_verification_does_not_certify_the_objects(self):
+        source='Всего 72 изделия, это уже проверили.'
+        with self.assertRaises(ValueError):
+            self.render(source,[{'summary':'Заказано 72 изделия, которые уже проверены.','evidence':source}])
+
+    def test_count_can_still_be_reported_as_checked(self):
+        source='Всего 72 изделия, это уже проверили.'
+        self.assertEqual(self.render(source,[{'summary':'Количество изделий — 72, оно проверено.','evidence':source}]),'• Количество изделий — 72, оно проверено.')
+
+class CountEvidenceTests(unittest.TestCase):
+    render = SummaryIntegrityTests.render
+    def test_explicit_count_verification_relative_clause_is_accepted(self):
+        source='Всего 72 изделия, это уже проверили.'
+        text='Заказано 72 изделия, количество которых проверено.'
+        self.assertEqual(self.render(source,[{'summary':text,'evidence':source}]),'• '+text)
+
+    def test_unknown_quality_does_not_imply_quality_was_not_checked(self):
+        source='Всего 72 изделия, это уже проверили.'
+        with self.assertRaises(ValueError):
+            self.render(source,[{'summary':'Всего 72 изделия. Свойства изделий не проверялись.','evidence':source}])
 
 if __name__ == '__main__':
     unittest.main()

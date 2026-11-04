@@ -1,9 +1,5 @@
-*.swift text eol=lf
-*.py text eol=lf
-*.md text eol=lf
-*.sh text eol=lf
+*.wav binary
 *.png binary
 *.icns binary
-*.wav binary
-*.zip binary
-dist/** linguist-vendored
+*.whl binary
+*.model binary

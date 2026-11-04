@@ -35,6 +35,32 @@ class ArchiveWriteError(OSError):
     """The input cannot be ACKed until its transcript reaches persistent storage."""
 
 
+def aligned_segments(result, window_start, window_seconds):
+    """Use existing decoder token times, without another model or decode pass."""
+    tokens = getattr(result, 'tokens', None)
+    if not tokens:
+        return None
+    segments, pieces = [], []
+    began = previous_end = None
+    for token in tokens:
+        start, duration = float(token.start), float(token.duration)
+        if not math.isfinite(start) or not math.isfinite(duration) or start < 0 or start > window_seconds+0.5 or duration < 0:
+            raise ValueError('Некорректная временная разметка распознавания')
+        if pieces and start-previous_end >= 1:
+            segments.append((window_start+began, ''.join(pieces).strip()))
+            pieces = []
+        if not pieces:
+            began = min(start, window_seconds)
+        pieces.append(token.text)
+        previous_end = start+duration
+        if re.search(r'[.!?;]\s*$', token.text):
+            segments.append((window_start+began, ''.join(pieces).strip()))
+            pieces = []
+    if pieces:
+        segments.append((window_start+began, ''.join(pieces).strip()))
+    return [(stamp, text) for stamp, text in segments if any(c.isalnum() for c in text)]
+
+
 class Engine:
     def __init__(self, speech=True, transcript_log=None, summarization=True):
         self.transcript_log = transcript_log
@@ -46,7 +72,7 @@ class Engine:
             from mlx_lm import load
             from mlx_lm.sample_utils import make_sampler
             self.sampler = make_sampler(temp=0)
-            emit('loading', text='Загрузка модели смысловой сводки 9B…')
+            emit('loading', text='Загрузка модели смысловой сводки ' + os.environ.get('MEETING_SUMMARY_MODEL_LABEL', 'Qwen3.5 9B') + '…')
             with contextlib.redirect_stdout(sys.stderr):
                 self.model, self.tokenizer = load(str(ROOT / 'runtime/models/summary-9b'))
         self.speech = None
@@ -82,17 +108,32 @@ class Engine:
         from summary_writer import write_summary
         # Condense the recent transcript, then review the draft against the same source.
         sentences = [s.strip() for s in re.split(r'(?<=[.!?;])\s+|\n+', text) if s.strip()]
-        boilerplate = re.compile(r'^(доброе утро|добрый (день|вечер)|всем привет|привет всем|меня (хорошо )?слышно|всем (всё )?видно|давайте нач(инать|нём)|да[, ]+вс[её] (отлично|хорошо))[.!? ]*$', re.I)
+        boilerplate = re.compile(r'^(доброе утро|добрый (день|вечер)|всем привет|привет всем|меня (хорошо )?слышно|всем (всё )?видно|давайте нач(инать|нём)|да[, ]+вс[её] (отлично|хорошо)|да[, ]+слышно|(?:тогда )?жд[её]м остальных)[.!? ]*$', re.I)
         sentences = [s for s in sentences if not boilerplate.match(s)]
         sentences = sentences[-80:]
         while len(sentences) > 1 and len(" ".join(sentences)) > 10000:
             sentences.pop(0)
         if not sentences:
             return ''
-        with contextlib.redirect_stdout(sys.stderr):
-            result = write_summary(self.model, self.tokenizer, ' '.join(sentences)[-10000:], self.sampler)
-        self.mx.clear_cache()
-        return result
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                return write_summary(self.model, self.tokenizer, ' '.join(sentences)[-10000:], self.sampler)
+        finally:
+            # Rejected drafts must release unused generation buffers as well.
+            # The loaded model remains available for the next context.
+            self.mx.clear_cache()
+
+    def title(self, text):
+        from session_title import generate_title
+        from mlx_lm import generate
+        def generator(messages):
+            prompt = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+            return generate(self.model, self.tokenizer, prompt=prompt, max_tokens=180, sampler=self.sampler, verbose=False)
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                return generate_title(generator, text)
+        finally:
+            self.mx.clear_cache()
 
     def transcribe(self, path, timestamp):
         import numpy as np
@@ -100,6 +141,7 @@ class Engine:
         from scipy.signal import resample_poly
         from math import gcd
         from parakeet_mlx.audio import get_logmel
+        self.transcript_segments = None
         audio, rate = sf.read(path, dtype='float32', always_2d=True)
         if rate <= 0 or len(audio) == 0 or len(audio) > rate*45:
             raise ValueError('Пустой или слишком длинный аудиофрагмент')
@@ -128,7 +170,10 @@ class Engine:
             return ''
         with contextlib.redirect_stdout(sys.stderr):
             mel = get_logmel(self.mx.array(self.audio), self.speech.preprocessor_config)
-            text = self.speech.generate(mel)[0].text.strip()
+            result = self.speech.generate(mel)[0]
+            text = result.text.strip()
+            seconds = len(self.audio)/target
+            self.transcript_segments = aligned_segments(result, timestamp-seconds, seconds)
         return text
 
     def process(self, path, timestamp, *, summarize=True, keep_audio=False, request_id=None):
@@ -148,10 +193,11 @@ class Engine:
         # must never delay a transcript commit or discard the unfinished phrase.
         if self.transcript_log is not None:
             try:
-                self.transcript_log.update(text, timestamp, audio_seconds, request_id=request_id)
+                self.transcript_log.update(text, timestamp, audio_seconds, request_id=request_id,
+                                           segments=getattr(self, 'transcript_segments', None))
             except OSError as error:
                 raise ArchiveWriteError('Не удалось сохранить расшифровку: ' + str(error)[:250]) from error
-        context = self.recent.update(text, timestamp, audio_seconds)
+        context = self.recent.update(text, timestamp, audio_seconds, segments=getattr(self, 'transcript_segments', None))
         if text:
             self.history.clear()
             self.history.append((timestamp, context))
@@ -181,13 +227,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--session', type=Path, required=True)
     parser.add_argument('--transcript-file', type=Path)
+    parser.add_argument('--audio-file', type=Path)
+    parser.add_argument('--audio-start', type=float)
     parser.add_argument('--mode', choices=('combined', 'transcribe', 'summarize'), default='combined')
     parser.add_argument('--resume', action='store_true')
     args = parser.parse_args()
     stage = args.mode
     try:
         session = args.session.resolve(strict=True)
-        transcript_log = TranscriptLog(args.transcript_file, resume=args.resume) if args.transcript_file and stage != 'summarize' else None
+        transcript_log = TranscriptLog(args.transcript_file, resume=args.resume,
+                                       audio_path=args.audio_file, audio_started_at=args.audio_start) if args.transcript_file and stage != 'summarize' else None
         engine = Engine(speech=stage != 'summarize', transcript_log=transcript_log, summarization=stage != 'transcribe')
     except Exception as error:
         emit('error', stage=stage, request_id=None, fatal=True,
@@ -205,6 +254,12 @@ def main():
                 raise ValueError('Некорректное время аудиофрагмента')
             emit('progress', stage=stage, request_id=request_id)
             if stage == 'summarize':
+                if 'title_text' in request:
+                    text = request['title_text']
+                    if not isinstance(text, str) or len(text) > 200_000:
+                        raise ValueError('Недопустимый текст названия')
+                    emit('result', stage=stage, request_id=request_id, title=engine.title(text))
+                    continue
                 text = request.get('text', '')
                 if not isinstance(text, str) or len(text) > 200_000:
                     raise ValueError('Недопустимый текст сводки')

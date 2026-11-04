@@ -217,3 +217,19 @@ class InstallReleaseTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class LegacyBackupTests(unittest.TestCase):
+    setUp = InstallReleaseTests.setUp
+    install = InstallReleaseTests.install
+    def test_legacy_four_module_runtime_can_be_restored(self):
+        (self.workers/'session_title.py').unlink()
+        (self.workers/'worker.py').write_text('print("legacy worker")')
+        receipt = self.install()
+        self.assertEqual(len(receipt['worker_sha256']),4)
+        self.assertFalse((self.runtime/'session_title.py').exists())
+
+    def test_current_title_dependency_is_required(self):
+        (self.workers/'session_title.py').unlink()
+        (self.workers/'worker.py').write_text('def title():\n    from session_title import generate_title\n')
+        with self.assertRaises(FileNotFoundError):self.install()
+        self.assertEqual((self.destination/'version').read_text(),'old')
