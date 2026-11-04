@@ -1,0 +1,107 @@
+name: Linux packages and real CPU inference
+on:
+  workflow_dispatch:
+    inputs:
+      inference:
+        description: Run genuine Parakeet + Qwen3.5-9B CPU inference on shipped synthetic fixture
+        type: boolean
+        default: true
+  push:
+    paths:
+      - 'linux/**'
+      - 'src/recent_transcript.py'
+      - 'src/transcript_log.py'
+      - 'src/summary_writer.py'
+      - 'src/session_title.py'
+      - '.github/workflows/linux*.yml'
+  pull_request:
+    paths:
+      - 'linux/**'
+      - 'src/*.py'
+      - '.github/workflows/linux*.yml'
+permissions:
+  contents: read
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      QT_QPA_PLATFORM: xcb
+      CMAKE_ARGS: '-DGGML_NATIVE=OFF -DGGML_AVX=ON -DGGML_AVX2=ON -DGGML_FMA=ON -DGGML_F16C=ON'
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+      XDG_DATA_HOME: ${{ github.workspace }}/.linux-test-data
+      OMP_NUM_THREADS: '4'
+      OPENBLAS_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: linux/requirements*.txt
+      - name: System build and desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build patchelf ffmpeg pulseaudio pulseaudio-utils xvfb xauth libgl1 libegl1 libxkbcommon0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxkbcommon-x11-0
+      - name: Extra swap for 9B CPU inference on small private runners
+        if: github.event_name == 'workflow_dispatch' && inputs.inference
+        run: |
+          free -h
+          df -h . /mnt
+          sudo fallocate -l 8G /mnt/meeting-summary.swap
+          sudo chmod 600 /mnt/meeting-summary.swap
+          sudo mkswap /mnt/meeting-summary.swap
+          sudo swapon /mnt/meeting-summary.swap
+      - name: Install pinned Python runtime and build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r linux/requirements-build.txt
+          python -m pip check
+      - name: Portable and shared regressions
+        run: |
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          python -m unittest discover -s linux/tests -p 'test_linux_core.py' -v
+      - name: Genuine virtual system and microphone capture
+        run: |
+          pulseaudio --start --exit-idle-time=-1
+          MEETING_TEST_PULSE=1 MEETING_CAPTURE_REPORT="$PWD/linux-capture.json" python -m unittest discover -s linux/tests -p 'test_capture_pulse.py' -v
+      - name: Overlay GUI and stale-summary/scroll behavior on X11
+        run: MEETING_GUI_SCREENSHOT=linux-gui.png xvfb-run -a python linux/entrypoint.py --gui-smoke --report linux-gui.json
+      - name: Cache pinned model artifacts
+        if: github.event_name == 'workflow_dispatch' && inputs.inference
+        uses: actions/cache@v4
+        with:
+          path: .linux-test-data/meeting-summary/models
+          key: linux-models-${{ hashFiles('linux/meeting_summary/models.json') }}
+      - name: Real Parakeet ONNX and Qwen3.5-9B inference, pair save/load
+        if: github.event_name == 'workflow_dispatch' && inputs.inference
+        run: |
+          python linux/entrypoint.py --download-models
+          python linux/entrypoint.py --inference-test tests/meeting-sample.wav --report linux-inference.json
+      - name: Build standalone DEB and AppImage
+        env:
+          OUTPUT: ${{ github.workspace }}/linux-artifacts
+          RUN_INFERENCE_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.inference && '1' || '0' }}
+        run: bash linux/build.sh
+      - name: Install DEB and verify saved artifact
+        run: |
+          sudo apt-get install -y ./linux-artifacts/*.deb
+          /usr/bin/meeting-summary --version
+          xvfb-run -a /usr/bin/meeting-summary --gui-smoke --report linux-artifacts/installed-gui.json
+          APPIMAGE_EXTRACT_AND_RUN=1 ./linux-artifacts/*.AppImage --version
+          QT_QPA_PLATFORM=offscreen APPIMAGE_EXTRACT_AND_RUN=1 ./linux-artifacts/*.AppImage --gui-smoke --report linux-artifacts/appimage-gui.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: meeting-summary-linux-${{ github.run_number }}
+          path: |
+            linux-artifacts/
+            linux-capture.json
+            linux-gui.json
+            linux-gui.png
+            linux-inference.json
+          if-no-files-found: warn
+          retention-days: 14
