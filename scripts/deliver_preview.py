@@ -22,7 +22,7 @@ import zipfile
 REPO='Markiz-Ksan/meeting-summary'
 REPO_ID=1442233273
 PREFIX='/repos/'+REPO
-TITLE='0.7.0 beta — build 18 — без модельных тестов'
+TITLE='0.7.0 beta — сборка 18'
 MAX_ZIP=1024**3
 MAX_TOTAL=2*1024**3
 MAX_COMPRESSION_RATIO=1000  # Dependency test data can legitimately exceed200:1.

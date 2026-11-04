@@ -20,7 +20,7 @@ if MODULE.exists():
 else: delivery=None
 HEAD='a'*40
 SHA='b'*64
-TITLE='0.7.0 beta — build 18 — без модельных тестов'
+TITLE='0.7.0 beta — сборка 18'
 MAC='MeetingSummary-0.7.0-beta-macos-arm64.zip'
 DEB='meeting-summary_0.7.0_amd64.deb'
 APP='MeetingSummary-0.7.0-x86_64.AppImage'
