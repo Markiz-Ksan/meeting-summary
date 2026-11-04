@@ -88,6 +88,78 @@ def preserve_statement_scope(text, quote):
                     raise ValueError('Сохрани ограничение срока именно при отрицательном обещании. Срок другого события в том же пункте его не заменяет; не обещают сегодня не означает не обещают вообще.')
 
 
+
+TRANSFER_PATTERN = r'\b(?:перен[ео]с\w*|сдви[гн]\w*|отлож\w*|откладыва\w*|отсроч\w*)\b'
+TRANSFER_EVENTS = (
+    ('meeting', r'\b(?:встреч|созвон|совещан)\w*'),
+    ('release', r'\b(?:релиз|выпуск)\w*'),
+    ('delivery', r'\b(?:доставк|поставк|отгрузк|отправк)\w*'),
+    ('payment', r'\b(?:оплат|платеж)\w*'),
+    ('signing', r'\bподписани\w*'),
+    ('testing', r'\b(?:тестирован|испытани|проверк)\w*'),
+)
+TRANSFER_DATES = (r'сегодня', r'завтра', r'послезавтра', r'вчера',
+                  r'понедельник\w*', r'вторник\w*', r'сред[ауыое]', r'четверг\w*',
+                  r'пятниц\w*', r'суббот\w*', r'воскресень\w*')
+
+
+def preserve_transfer_event(text, quote):
+    """Check only simple one-noun transfer clauses with date complements.
+
+    Known source event families can reject a different bare draft subject or a
+    borrowed date. Unknown nouns, adjectives, coordination and prepositional
+    circumstances in source transfer clauses retain the older validation path.
+    This intentionally does not parse general Russian grammatical roles.
+    """
+    date = (r'(?:'+'|'.join(TRANSFER_DATES)+
+            r'|\d{1,2}(?:[./]\d{1,2}(?:[./]\d{2,4})?|:\d{2}))')
+    date_phrase = r'(?:с|со|на|до|к|после)\s+(?:следующ\w*\s+)?'+date
+
+    def frames(value):
+        result = []
+        # Do not split inside numeric dates/times. No adjective or PP removal:
+        # an unsupported clause is marked None rather than misparsed.
+        clauses = re.split(r'[!?;,]|(?<!\d)[.:]|[.:](?!\d)', value)
+        for clause in clauses:
+            predicates = list(re.finditer(TRANSFER_PATTERN, clause))
+            if not predicates: continue
+            if len(predicates) != 1:
+                result.append(None); continue
+            predicate = predicates[0]
+            before, tail = clause[:predicate.start()].strip(), clause[predicate.end():].strip()
+            noun = before
+            if not before and tail and not re.match(r'^(?:с|со|на|до|к|после)\b', tail):
+                noun, _, tail = tail.partition(' ')
+            if ((noun and not re.fullmatch(r'[а-яa-z]+', noun)) or
+                    not re.fullmatch(r'(?:'+date_phrase+r'(?:\s+'+date_phrase+r')*)?', tail)):
+                result.append(None); continue
+            family = next((family for family, pattern in TRANSFER_EVENTS if re.fullmatch(pattern, noun)), '')
+            # Only target complements may supply a new date. A date after "с"
+            # is the original date, not evidence for the target of the transfer.
+            targets = set()
+            for match in re.finditer(r'\b(?:на|до|к|после)\s+(?:следующ\w*\s+)?('+date+r')', tail):
+                token = match.group(1)
+                key = next((str(i) for i, pattern in enumerate(TRANSFER_DATES)
+                            if re.fullmatch(pattern, token)), token.replace('/', '.'))
+                targets.add(key)
+            result.append((family, targets))
+        return result
+
+    originals = frames(quote)
+    # An unknown/mixed source transfer may explain the draft. Preserve previous
+    # behavior rather than rejecting a valid paraphrase of unsupported syntax.
+    if any(frame is None or not frame[0] for frame in originals): return False
+    drafts = frames(text)
+    for frame in drafts:
+        if frame is None: continue
+        event, when = frame
+        if not event or not any(event == original and when <= original_when
+                                for original, original_when in originals):
+            raise ValueError('Сохрани названное событие переноса и его срок из одной исходной фразы. '
+                             'Не подменяй событие другим предметом или безличным переносом; '
+                             'событие и дата из другой части цитаты не являются подтверждением.')
+    return bool(drafts) and all(frame is not None for frame in drafts)
+
 def grounded_summary(raw, source):
     """Require source evidence; reject unsupported numbers and decision upgrades.
 
@@ -124,6 +196,7 @@ def grounded_summary(raw, source):
         if not numbers(text).issubset(numbers(quote)):
             raise ValueError('Черновик содержит неподтверждённый пункт')
         preserve_statement_scope(normalize(text), quote)
+        transfer_bound = preserve_transfer_event(normalize(text), quote)
         for plural, singular in ((r'обеща(?:ют|ем)', 'обещает'), (r'гарантиру(?:ют|ем)', 'гарантирует'), (r'подтвержда(?:ют|ем)', 'подтверждает')):
             if re.search(r'\bне\s+' + plural + r'\b', quote) and re.search(r'\bне\s+' + singular + r'\b', normalize(text)) and not re.search(r'\bне\s+' + singular + r'\b', quote):
                 raise ValueError('Не назначай нового субъекта обещания или подтверждения. Сохрани исходную безличную или множественную форму, если конкретный обещающий не назван.')
@@ -132,7 +205,8 @@ def grounded_summary(raw, source):
         decision = r'\b(?:решили|утвердили|согласовали|выбрали|приняли решение)\b'
         if re.search(decision, normalize(text)) and not re.search(decision, quote):
             raise ValueError('Черновик содержит неподтверждённый пункт')
-        if re.search(r'\bперен[еёо]с\w*\b', normalize(text)) and not re.search(r'\bперен[еёо]с\w*\b', quote):
+        if (re.search(r'\bперен[еёо]с\w*\b', normalize(text)) and
+                not re.search(r'\bперен[еёо]с\w*\b', quote) and not transfer_bound):
             raise ValueError('В источнике не говорили о переносе. Укажи только назначенную дату.')
         if re.search(r'\b(?:не|нет)\b', quote) and not re.search(r'\b(?:не|нет|отмен\w*|незаконч\w*|незаверш\w*|отсутств\w*|неизвестн\w*|неопредел\w*|неподтвержд\w*|несогласован\w*)\b', normalize(text)):
             raise ValueError('Потеряно отрицание: явно укажи, что подтверждения нет или решение не принято, если это есть в цитате.')

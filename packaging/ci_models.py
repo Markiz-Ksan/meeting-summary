@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import platform
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,43 @@ import urllib.request
 
 PROJECT = Path(__file__).resolve().parents[1]
 FIXTURE_SHA256 = 'ab59fe1aa9025ebe14c6fae09df53601b3f7ec747f358b103471482915d1125a'
+TITLE_FIXTURE_TEXT = 'Обсудили сроки поставки оборудования. Поставку оборудования планируем на пятницу.'
+
+
+def fixture_summary_semantics(source, summary, *, worker_validation_failed=False):
+    """Finite subject/day regression for this pinned WAV, not a general fact checker.
+
+    A response can be valid JSON and pass the worker's validator while changing
+    the event. These independent fixture assertions deliberately do not reuse
+    summary_writer's guards or tune any acceptance/holdout corpus.
+    """
+    def clauses(text):
+        return [part for part in re.split(r'[.!?;,\n]+', text.lower().replace('ё', 'е')) if part.strip()]
+    def meeting_friday(text):
+        return any(re.search(r'\bвстреч\w*', part) and re.search(r'\bпятниц\w*', part)
+                   for part in clauses(text))
+    def release_friday_claim(text):
+        return any(re.search(r'\bрелиз\w*', part) and re.search(r'\bпятниц\w*', part)
+                   and not re.search(r'\bне\s+(?:назнач|перен|планир|состо|буд|выпус|выхо)\w*', part)
+                   for part in clauses(text))
+    checks = dict(source_has_expected_meeting_friday=meeting_friday(source),
+                  model_summary_nonempty=bool(summary.strip()),
+                  worker_validation_succeeded=not worker_validation_failed,
+                  meeting_bound_to_friday=meeting_friday(summary),
+                  release_not_assigned_to_friday=not release_friday_claim(summary))
+    return dict(check_id='pinned-audio-meeting-friday-v1', fixture_sha256=FIXTURE_SHA256,
+                scope='Finite subject/day checks only; other semantic errors and omissions are not excluded.',
+                passed=all(checks.values()), checks=checks,
+                failures=[name for name, passed in checks.items() if not passed])
+
+
+def complete_acceptance_status(report):
+    phases = [report.get(name, {}) for name in ('cold_inference', 'offline_second_inference')]
+    report['semantic_fixture_passed'] = all(phase.get('fixture_summary_semantics', {}).get('passed', False)
+                                             for phase in phases)
+    report['passed'] = bool(report.get('runtime_transport_passed') and report['semantic_fixture_passed'])
+    report['passed_scope'] = 'Runtime and named finite fixture checks; not general or human semantic acceptance.'
+    report['general_semantic_acceptance'] = False
 
 
 def sha(path):
@@ -156,16 +194,21 @@ def inference(receipt, directory, fixture, label):
         summary.wait('ready')
         summary.send(dict(request_id=2, text=context, timestamp=time.time()))
         condensed = summary.wait('result', 2)
-        if not condensed.get('summary', '').strip() or condensed.get('validation_failed'):
-            raise AssertionError('Public model did not produce an accepted nonempty summary of the synthetic ASR text')
-        summary.send(dict(request_id=3, title_text='Обсудили сроки поставки оборудования. Поставку оборудования планируем на пятницу.'))
+        summary.send(dict(request_id=3, title_text=TITLE_FIXTURE_TEXT))
         title = summary.wait('result', 3).get('title')
-        if not title or not 3 <= len(title.split()) <= 7:
-            raise AssertionError('Public model did not produce a validated neutral synthetic topic')
+        if title is not None and not isinstance(title, str):
+            raise AssertionError('Title protocol returned an invalid type')
     finally:
         summary.close()
     return dict(asr_wall_seconds=round(asr_elapsed, 3), summary_title_wall_seconds=round(time.monotonic()-began, 3),
-                synthetic_asr=context, synthetic_summary=condensed['summary'], synthetic_title=title,
+                synthetic_asr=context, synthetic_summary=condensed.get('summary', ''),
+                summary_input_source='ASR of the pinned synthetic audio fixture',
+                summary_validation_failed=bool(condensed.get('validation_failed')),
+                fixture_summary_semantics=fixture_summary_semantics(
+                    context, condensed.get('summary', ''), worker_validation_failed=bool(condensed.get('validation_failed'))),
+                synthetic_title=title, synthetic_title_input=TITLE_FIXTURE_TEXT,
+                synthetic_title_input_source='Separate fixed text; not the audio or ASR transcript',
+                title_safe_fallback=not bool(title), runtime_transport_passed=True,
                 asr_peak_active_memory_mb=recognized.get('memory_mb'),
                 summary_peak_active_memory_mb=condensed.get('memory_mb'),
                 workers='sequential ASR then summary; simultaneous app load is not validated',
@@ -173,7 +216,8 @@ def inference(receipt, directory, fixture, label):
 
 
 def validate(profile, output):
-    report = dict(format=1, profile=profile, passed=False, fixture_sha256=FIXTURE_SHA256,
+    report = dict(format=2, profile=profile, passed=False, runtime_transport_passed=False,
+                  semantic_fixture_passed=None, general_semantic_acceptance=False, fixture_sha256=FIXTURE_SHA256,
                   fixture_seconds=17.281, fixture_is_synthetic=True, audio_capture_or_playback=False,
                   artifacts_contain_audio_or_images=False, physical_8gb_acceptance=False, machine=machine())
     write_report(output, report)
@@ -234,7 +278,10 @@ def validate(profile, output):
             report['offline_second_inference'] = inference(second, temp/'second-inference', fixture, label)
             if before != snapshot():
                 raise AssertionError('Offline inference modified model assets')
-            report['passed'] = True
+            report['runtime_transport_passed'] = True
+            complete_acceptance_status(report)
+            if not report['semantic_fixture_passed']:
+                raise AssertionError('Runtime passed but the pinned-fixture semantic checks failed; inspect per-phase failures')
     except BaseException as error:
         report['error'] = type(error).__name__+': '+str(error)
         raise
@@ -266,7 +313,60 @@ for line in sys.stdin:
             worker.close()
         if worker.process.poll() is None:
             raise AssertionError('Fixture worker was not reaped')
-    print('PASS: real child protocol, correlated result, offline network denial and child cleanup; no model/audio operations')
+    source = ('Коллеги, встречу переносим с четверга на пятницу. Анна подготовит смету к вечеру. '
+              'Бюджет остается 100 тысяч рублей. Сегодня релиз не выпускаем, потому что тесты '
+              'авторизации еще не прошли. Сначала исправим ошибки. Новую дату релиза пока не назначили.')
+    correct = ('Встречу переносим с четверга на пятницу. Анна подготовит смету к вечеру. '
+               'Бюджет остается 100 тысяч рублей. Сегодня релиз не выпускаем: тесты авторизации '
+               'еще не прошли. Сначала исправим ошибки. Новую дату релиза пока не назначили.')
+    assert fixture_summary_semantics(source, correct)['passed']
+    for subject in ('Метод', 'Релиз', 'Бюджет'):
+        wrong = correct.replace('Встречу переносим', subject+' перенесен')
+        checks = fixture_summary_semantics(source, wrong)
+        assert not checks['passed'], 'Wrong Friday-event subject was accepted: '+subject
+        assert 'meeting_bound_to_friday' in checks['failures']
+    wrong_release = correct+' Релиз назначен на пятницу.'
+    assert not fixture_summary_semantics(source, wrong_release)['passed']
+    compressed = 'Встреча состоится в пятницу, а релиз пока не выпускаем.'
+    assert fixture_summary_semantics(source, compressed)['passed']
+    broken = dict(runtime_transport_passed=True, cold_inference={
+        'fixture_summary_semantics': fixture_summary_semantics(source, 'Метод перенесен на пятницу.')},
+        offline_second_inference={'fixture_summary_semantics': fixture_summary_semantics(source, correct)})
+    complete_acceptance_status(broken)
+    assert broken['runtime_transport_passed'] and not broken['semantic_fixture_passed'] and not broken['passed']
+    assert TITLE_FIXTURE_TEXT and TITLE_FIXTURE_TEXT != source
+    # Exercise the real report constructor with synthetic protocol responses:
+    # a valid separate equipment title must not bless a corrupted audio summary.
+    from unittest.mock import patch
+    for returned_title in ('Обсуждение сроков поставки оборудования', None):
+        sent = []
+        class FakeWorker:
+            def __init__(self, script, mode, session, transcript, fixture, label):
+                self.mode = mode
+                if mode == 'transcribe':
+                    transcript.write_text('[00:00:00] synthetic fixture row')
+            def wait(self, event, request_id=None, timeout=180):
+                if event == 'ready':
+                    return dict(event='ready')
+                if self.mode == 'transcribe':
+                    return dict(summary_context=source, memory_mb=646)
+                if request_id == 2:
+                    return dict(summary='Метод перенесен на пятницу.', validation_failed=False, memory_mb=2258)
+                return dict(title=returned_title)
+            def send(self, request):
+                sent.append(request)
+            def close(self):
+                pass
+        with tempfile.TemporaryDirectory(prefix='meeting-ci-report-check-') as folder:
+            base = Path(folder); fixture = base/'fake.wav'; fixture.write_bytes(b'not decoded or played')
+            with patch.dict(globals(), Worker=FakeWorker):
+                result = inference({'worker': str(base/'unused.py')}, base/'run', fixture, 'fixture')
+        assert result['runtime_transport_passed'] and not result['fixture_summary_semantics']['passed']
+        assert result['synthetic_title_input'] == TITLE_FIXTURE_TEXT != result['synthetic_asr']
+        assert result['synthetic_title_input_source'].startswith('Separate fixed text')
+        assert result['title_safe_fallback'] == (returned_title is None)
+        assert sent[-1]['title_text'] == TITLE_FIXTURE_TEXT
+    print('PASS: real child protocol/network denial/cleanup; independent fixture event-binding and runtime-versus-semantic status checks; no model/audio operations')
 
 
 def main():

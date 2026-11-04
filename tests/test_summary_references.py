@@ -216,3 +216,150 @@ class ReferenceTests(unittest.TestCase):
     def test_explicit_singular_promising_actor_is_preserved(self):
         raw='[{"summary":"Склад пока не обещает доставку.","sources":[1]}]'
         self.assertEqual(write_summary_with(lambda _:raw,'Склад пока не обещает доставку.'),'• Склад пока не обещает доставку.')
+
+class TransferEventGroundingTests(unittest.TestCase):
+    def render(self, source, draft):
+        return grounded_summary(json.dumps([{'summary': draft, 'evidence': source}], ensure_ascii=False), source)
+
+    def test_prepositional_event_and_adjective_inflection_keep_valid_legacy_rendering(self):
+        cases = [
+            ('Перед встречей релиз перенесли на пятницу.', 'Выпуск перенесли на пятницу.'),
+            ('Перед новой презентацией встречу перенесли на пятницу.', 'Встречу перенесли на пятницу.'),
+            ('Рабочую встречу переносим на пятницу.', 'Рабочая встреча перенесена на пятницу.'),
+        ]
+        for source, draft in cases:
+            with self.subTest(source=source): self.assertEqual(self.render(source, draft), '• '+draft)
+
+    def test_public_light_actual_draft_cannot_change_transferred_meeting_into_another_subject(self):
+        source = ('Коллеги, встречу переносим с четверга на пятницу. Анна подготовит смету к вечеру. '
+                  'Бюджет остается 100 тысяч рублей. Сегодня релиз не выпускаем, потому что тесты '
+                  'авторизации еще не прошли. Сначала исправим ошибки. Новую дату релиза пока не назначили.')
+        draft = ('Метод перенесен на пятницу, Анна сделает смету до вечера при бюджете 100 тыс. руб. '
+                 'Релиз отложен до исправления ошибок и прохождения тестов; новую дату пока не назначили.')
+        with self.assertRaisesRegex(ValueError, 'событи'):
+            self.render(source, draft)
+
+    def test_transferred_event_is_not_arbitrarily_replaced_or_omitted(self):
+        source = 'Совещание переносим на пятницу.'
+        for draft in ['Бюджет перенесен на пятницу.', 'Документ перенесли на пятницу.', 'Перенесено на пятницу.']:
+            with self.subTest(draft=draft), self.assertRaisesRegex(ValueError, 'событи'):
+                self.render(source, draft)
+
+    def test_an_event_mentioned_elsewhere_does_not_inherit_another_event_transfer(self):
+        source = 'Встречу переносим на пятницу. Релиз выпускаем в понедельник.'
+        with self.assertRaisesRegex(ValueError, 'событи'):
+            self.render(source, 'Релиз перенесен на пятницу.')
+
+    def test_each_transferred_event_keeps_its_own_weekday(self):
+        source = 'Встречу переносим на пятницу. Релиз переносим на понедельник.'
+        for draft in ['Встреча перенесена на понедельник.', 'Релиз перенесен на пятницу.']:
+            with self.subTest(draft=draft), self.assertRaisesRegex(ValueError, 'событи'):
+                self.render(source, draft)
+
+    def test_transfer_categories_accept_ordinary_event_and_predicate_paraphrases(self):
+        cases = [
+            ('Созвон переносим на среду.', 'Встречу перенесли на среду.'),
+            ('Выпуск отложили до вторника.', 'Релиз перенесен на вторник.'),
+            ('Отгрузку перенесли на четверг.', 'Поставку сдвинули на четверг.'),
+            ('Платеж перенесли на среду.', 'Оплату перенесли на среду.'),
+            ('Подписание отложили до четверга.', 'Подписание перенесли на четверг.'),
+            ('Тестирование перенесли на вторник.', 'Испытания сдвинули на вторник.'),
+        ]
+        for source, draft in cases:
+            with self.subTest(source=source): self.assertEqual(self.render(source, draft), '• '+draft)
+
+    def test_unsupported_source_keeps_legacy_transfer_predicate_gate(self):
+        with self.assertRaises(ValueError):
+            self.render('Метод отложили на пятницу.', 'Встречу перенесли на пятницу.')
+        self.assertEqual(self.render('Выпуск отложили на пятницу.', 'Релиз перенесли на пятницу.'),
+                         '• Релиз перенесли на пятницу.')
+
+    def test_real_method_transfer_and_unclassified_nouns_are_not_blacklisted(self):
+        cases = [
+            ('Метод перенесли на пятницу.', 'Метод перенесен на пятницу.'),
+            ('Анна перенесла метод на четверг.', 'Метод перенесли на четверг.'),
+            ('Семинар перенесли на вторник.', 'Семинар перенесен на вторник.'),
+            ('Встречу перенесли на пятницу. Метод перенесли на четверг.', 'Метод перенесен на четверг.'),
+            ('Перенесли на пятницу.', 'Перенесли на пятницу.'),
+        ]
+        for source, draft in cases:
+            with self.subTest(source=source): self.assertEqual(self.render(source, draft), '• '+draft)
+
+    def test_multiple_quoted_events_are_usable_when_each_transfer_matches_its_local_source(self):
+        source = 'Встречу переносим на пятницу. Выпуск переносим на понедельник.'
+        draft = 'Созвон перенесен на пятницу; релиз сдвинули на понедельник.'
+        self.assertEqual(self.render(source, draft), '• '+draft)
+
+    def test_event_rejection_gets_one_fresh_grounded_repair_with_specific_hint(self):
+        calls = []
+        def generate(messages):
+            calls.append(messages)
+            draft = 'Документ перенесен на пятницу.' if len(calls) == 1 else 'Совещание перенесли на пятницу.'
+            return json.dumps([{'summary': draft, 'sources': [1]}], ensure_ascii=False)
+        self.assertEqual(write_summary_with(generate, 'Встречу переносим на пятницу.'),
+                         '• Совещание перенесли на пятницу.')
+        self.assertEqual(len(calls), 2)
+        self.assertIn('событи', calls[1][0]['content'].lower())
+        self.assertNotIn('Документ', calls[1][1]['content'])
+
+    def test_unsupported_complex_sources_keep_valid_legacy_paraphrases(self):
+        # These forms are deliberately outside the simple-clause event guard.
+        cases = [
+            ('Релиз переносим на время встречи в пятницу.', 'Выпуск перенесли на пятницу.'),
+            ('Метод перенесли после встречи на пятницу.', 'Метод перенесен на пятницу.'),
+            ('Встречу готовили и релиз перенесли на понедельник.', 'Выпуск перенесли на понедельник.'),
+        ]
+        for source, draft in cases:
+            with self.subTest(source=source): self.assertEqual(self.render(source, draft), '• '+draft)
+
+    def test_coordinated_transferred_events_and_contextual_event_references_are_supported(self):
+        cases = [
+            ('Встречу и релиз перенесли на пятницу.', 'Совещание и выпуск перенесли на пятницу.'),
+            ('Релиз переносим на время встречи в пятницу.', 'Выпуск перенесли на пятницу.'),
+            ('Метод перенесли после встречи на пятницу.', 'Метод перенесен на пятницу.'),
+        ]
+        for source, draft in cases:
+            with self.subTest(source=source): self.assertEqual(self.render(source, draft), '• '+draft)
+
+    def test_original_date_and_another_event_numeric_date_cannot_become_new_target(self):
+        cases = [
+            ('Встречу переносим с четверга на пятницу.', 'Встречу перенесли на четверг.'),
+            ('Встречу переносим на 12.11.2026. Релиз переносим на 15.11.2026.', 'Встреча перенесена на 15.11.2026.'),
+        ]
+        for source, draft in cases:
+            with self.subTest(source=source), self.assertRaisesRegex(ValueError, 'событи'):
+                self.render(source, draft)
+
+    def test_unclassified_draft_subject_cannot_replace_a_known_simple_event(self):
+        with self.assertRaisesRegex(ValueError, 'событи'):
+            self.render('Встречу перенесли на пятницу.', 'Шаблонизацию перенесли на пятницу.')
+
+    def test_unknown_event_accusative_and_nominative_are_equivalent(self):
+        cases = [
+            ('Презентацию переносим на пятницу.', 'Презентация перенесена на пятницу.'),
+            ('Лекцию переносим на пятницу.', 'Лекция перенесена на пятницу.'),
+            ('Презентация перенесена на пятницу.', 'Презентацию перенесли на пятницу.'),
+        ]
+        for source, draft in cases:
+            with self.subTest(source=source): self.assertEqual(self.render(source, draft), '• '+draft)
+
+    def test_mixed_coordinated_sources_keep_valid_legacy_paraphrases(self):
+        # Coordination is outside this guard; no assertion of subject grounding.
+        source = 'Встречу и презентацию перенесли на пятницу.'
+        self.assertEqual(self.render(source, 'Совещание и презентация перенесены на пятницу.'),
+                         '• Совещание и презентация перенесены на пятницу.')
+
+    def test_an_assigned_date_cannot_ground_a_new_transfer_predicate(self):
+        for draft in ['Встречу отложили на пятницу.', 'Встречу сдвинули на пятницу.',
+                      'Встречу отсрочили до пятницы.']:
+            with self.subTest(draft=draft), self.assertRaises(ValueError):
+                self.render('Встреча в пятницу.', draft)
+
+    def test_modified_circumstances_keep_valid_legacy_paraphrases(self):
+        cases = [
+            ('После рабочей встречи релиз перенесли на пятницу.', 'Выпуск перенесли на пятницу.'),
+            ('После следующей рабочей встречи релиз перенесли на пятницу.', 'Выпуск перенесли на пятницу.'),
+            ('Перед новой презентацией встречу перенесли на пятницу.', 'Встреча перенесена на пятницу.'),
+        ]
+        for source, draft in cases:
+            with self.subTest(source=source): self.assertEqual(self.render(source, draft), '• '+draft)
